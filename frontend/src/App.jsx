@@ -31,6 +31,16 @@ function BrandLogo({ compact = false }) {
   );
 }
 
+function QualityStrip() {
+  return (
+    <div className="qualityStrip">
+      <span>360° Preview</span>
+      <span>Fixture Layout</span>
+      <span>Measurement View</span>
+    </div>
+  );
+}
+
 function formatDate(value) {
   if (!value) return '';
   try {
@@ -103,19 +113,20 @@ function HomeScreen({ onAdmin, onProject }) {
     <main className="landing">
       <section className="landingCard glassCard">
         <BrandLogo />
-        <div className="brandPill">Fixture360 Preview</div>
-        <h1>View your shop fixture result</h1>
+        <div className="brandPill">ADINN Fixture360</div>
+        <h1>View your 360° fixture preview</h1>
         <p className="lead">
-          Enter the unique code shared with you to open your interactive 360° panorama, fixture placement, and measurement view.
+          Enter the unique code shared by ADINN to open your interactive shop panorama, fixture layout, and measurement preview.
         </p>
 
         <form className="codeForm" onSubmit={submitCode}>
           <label htmlFor="previewCode">Unique preview code</label>
           <input
             id="previewCode"
+            autoComplete="off"
             value={code}
             onChange={(event) => setCode(event.target.value.toUpperCase())}
-            placeholder="Example: DEMO360"
+            placeholder="Enter preview code"
             autoFocus
           />
           {error ? <div className="errorText">{error}</div> : null}
@@ -130,8 +141,10 @@ function HomeScreen({ onAdmin, onProject }) {
           <button type="button" onClick={() => setCode('DEMO360')}>DEMO360</button>
         </div>
 
+        <QualityStrip />
+
         <button className="linkBtn adminAccess" onClick={onAdmin} type="button">
-          <Lock size={16} /> Admin / Employee Login
+          <Lock size={16} /> Team Login
         </button>
       </section>
     </main>
@@ -139,7 +152,7 @@ function HomeScreen({ onAdmin, onProject }) {
 }
 
 function AdminLogin({ onLogin, onBack }) {
-  const [form, setForm] = useState({ email: 'admin@fixture360.local', password: 'admin123' });
+  const [form, setForm] = useState({ email: '', password: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -165,14 +178,13 @@ function AdminLogin({ onLogin, onBack }) {
       <section className="glassCard loginCard">
         <button className="linkBtn" onClick={onBack} type="button"><ArrowLeft size={16} /> Back</button>
         <BrandLogo compact />
-        <div className="iconBadge"><LayoutDashboard size={22} /></div>
-        <h1>Admin Login</h1>
+        <h1>Team Login</h1>
         <p className="muted">Create panorama projects, add measurements, place fixture previews, and share unique client codes.</p>
         <form className="stack" onSubmit={submit}>
           <label>Email</label>
-          <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+          <input name="fixture360_team_email" autoComplete="off" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
           <label>Password</label>
-          <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+          <input type="password" name="fixture360_team_password" autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
           {error ? <div className="errorText">{error}</div> : null}
           <button className="primaryBtn" disabled={loading} type="submit">
             <Lock size={18} /> {loading ? 'Signing in...' : 'Login'}
