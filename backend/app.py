@@ -2,24 +2,40 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import shutil
-import sqlite3
 import string
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from bson import ObjectId
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR))).resolve()
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(DATA_DIR / "uploads"))).resolve()
-DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "fixture360.db"))).resolve()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_DB = os.getenv("MONGODB_DB", "fixture360")
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+db: Database = mongo_client[MONGODB_DB]
+
+app = FastAPI(title="Fixture360 API", version="2.0.0")
+
 
 def parse_cors_origins() -> list[str]:
     raw = os.getenv("CORS_ORIGINS", "")
@@ -32,10 +48,6 @@ def parse_cors_origins() -> list[str]:
     ])
     return list(dict.fromkeys(origins))
 
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-app = FastAPI(title="Fixture360 API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,18 +62,6 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    if row is None:
-        return None
-    return {key: row[key] for key in row.keys()}
-
-
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
@@ -74,171 +74,163 @@ def generate_code() -> str:
 def safe_filename(filename: str) -> str:
     name = Path(filename).name
     stem = Path(name).stem[:48].replace(" ", "-") or "panorama"
+    stem = re.sub(r"[^A-Za-z0-9._-]", "-", stem)
     suffix = Path(name).suffix.lower() or ".jpg"
     token = secrets.token_hex(4)
     return f"{stem}-{token}{suffix}"
 
 
-def execute_schema() -> None:
-    with get_db() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'admin',
-                created_at TEXT NOT NULL
-            );
+def object_id(value: str) -> ObjectId:
+    if not ObjectId.is_valid(value):
+        raise HTTPException(status_code=404, detail="Invalid id")
+    return ObjectId(value)
 
-            CREATE TABLE IF NOT EXISTS sessions (
-                token TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
 
-            CREATE TABLE IF NOT EXISTS projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                unique_code TEXT UNIQUE NOT NULL,
-                project_name TEXT NOT NULL,
-                client_name TEXT NOT NULL,
-                client_phone TEXT,
-                location TEXT,
-                panorama_filename TEXT NOT NULL,
-                shop_width REAL,
-                shop_length REAL,
-                shop_height REAL,
-                unit TEXT NOT NULL DEFAULT 'ft',
-                status TEXT NOT NULL DEFAULT 'draft',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
+def setup_indexes() -> None:
+    db.users.create_index([("email", ASCENDING)], unique=True)
+    db.sessions.create_index([("token", ASCENDING)], unique=True)
+    db.sessions.create_index([("user_id", ASCENDING)])
+    db.projects.create_index([("unique_code", ASCENDING)], unique=True)
+    db.projects.create_index([("created_at", DESCENDING)])
+    db.projects.create_index([("measurements.id", ASCENDING)])
+    db.projects.create_index([("fixtures.id", ASCENDING)])
 
-            CREATE TABLE IF NOT EXISTS measurements (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL,
-                side_name TEXT NOT NULL,
-                width REAL NOT NULL,
-                height REAL NOT NULL,
-                unit TEXT NOT NULL DEFAULT 'ft',
-                yaw REAL NOT NULL DEFAULT 0,
-                pitch REAL NOT NULL DEFAULT 0,
-                remarks TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
-            );
 
-            CREATE TABLE IF NOT EXISTS fixtures (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL,
-                fixture_name TEXT NOT NULL,
-                fixture_type TEXT,
-                width REAL,
-                height REAL,
-                depth REAL,
-                unit TEXT NOT NULL DEFAULT 'ft',
-                yaw REAL NOT NULL DEFAULT 0,
-                pitch REAL NOT NULL DEFAULT 0,
-                scale REAL NOT NULL DEFAULT 1,
-                color TEXT NOT NULL DEFAULT '#CF1E01',
-                remarks TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL,
-                name TEXT,
-                message TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'new',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
-            );
-            """
-        )
-        conn.commit()
+def ensure_demo_panorama() -> None:
+    target = UPLOAD_DIR / "walltron-demo.jpeg"
+    if target.exists():
+        return
+    candidates = [
+        BASE_DIR / "uploads" / "walltron-demo.jpeg",
+        PROJECT_DIR / "sample" / "walltron-demo-panorama.jpeg",
+        PROJECT_DIR / "sample" / "walltron-demo.jpeg",
+    ]
+    for source in candidates:
+        if source.exists():
+            shutil.copyfile(source, target)
+            return
 
 
 def seed_data() -> None:
-    with get_db() as conn:
-        admin = conn.execute("SELECT id FROM users WHERE email = ?", ("admin@fixture360.local",)).fetchone()
-        if admin is None:
-            conn.execute(
-                "INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-                (
-                    "Fixture360 Admin",
-                    "admin@fixture360.local",
-                    hash_password("admin123"),
-                    "admin",
-                    now_iso(),
-                ),
-            )
+    created = now_iso()
 
-        demo = conn.execute("SELECT id FROM projects WHERE unique_code = ?", ("DEMO360",)).fetchone()
-        demo_file = UPLOAD_DIR / "walltron-demo.jpeg"
-        if demo is None and demo_file.exists():
-            created = now_iso()
-            cursor = conn.execute(
-                """
-                INSERT INTO projects (
-                    unique_code, project_name, client_name, client_phone, location,
-                    panorama_filename, shop_width, shop_length, shop_height, unit, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "DEMO360",
-                    "Walltron Shop Fixture Preview",
-                    "Demo Client",
-                    "",
-                    "Demo Retail Space",
-                    "walltron-demo.jpeg",
-                    18,
-                    24,
-                    10,
-                    "ft",
-                    "published",
-                    created,
-                    created,
-                ),
-            )
-            project_id = cursor.lastrowid
-            measurements = [
-                (project_id, "Front Display Wall", 18, 10, "ft", -25, 2, "Main customer-facing wall"),
-                (project_id, "Left Product Wall", 12, 10, "ft", -92, 0, "Exterior/interior wall shelf zone"),
-                (project_id, "Right Branding Wall", 12, 10, "ft", 62, 1, "Round Walltron display zone"),
-                (project_id, "Ceiling Height", 18, 10, "ft", 0, 46, "Overall height reference"),
-            ]
-            conn.executemany(
-                """
-                INSERT INTO measurements
-                (project_id, side_name, width, height, unit, yaw, pitch, remarks, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [(*item, created) for item in measurements],
-            )
-            fixtures = [
-                (project_id, "Premium Wall Shelf", "Wall Display", 8, 7, 1, "ft", -38, -4, 1.1, "#CF1E01", "Proposed shelf fixture"),
-                (project_id, "Circular Product Island", "Center Display", 6, 6, 2, "ft", 50, -5, 1.0, "#101828", "Hero product display"),
-            ]
-            conn.executemany(
-                """
-                INSERT INTO fixtures
-                (project_id, fixture_name, fixture_type, width, height, depth, unit, yaw, pitch, scale, color, remarks, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [(*item, created) for item in fixtures],
-            )
-        conn.commit()
+    if db.users.find_one({"email": "admin@fixture360.local"}) is None:
+        db.users.insert_one({
+            "name": "Fixture360 Admin",
+            "email": "admin@fixture360.local",
+            "password_hash": hash_password("admin123"),
+            "role": "admin",
+            "created_at": created,
+        })
+
+    ensure_demo_panorama()
+    if db.projects.find_one({"unique_code": "DEMO360"}) is None and (UPLOAD_DIR / "walltron-demo.jpeg").exists():
+        project_id = ObjectId()
+        db.projects.insert_one({
+            "_id": project_id,
+            "unique_code": "DEMO360",
+            "project_name": "Walltron Shop Fixture Preview",
+            "client_name": "Demo Client",
+            "client_phone": "",
+            "location": "Demo Retail Space",
+            "panorama_filename": "walltron-demo.jpeg",
+            "shop_width": 18,
+            "shop_length": 24,
+            "shop_height": 10,
+            "unit": "ft",
+            "status": "published",
+            "measurements": [
+                {
+                    "id": str(ObjectId()),
+                    "side_name": "Front Display Wall",
+                    "width": 18,
+                    "height": 10,
+                    "unit": "ft",
+                    "yaw": -25,
+                    "pitch": 2,
+                    "remarks": "Main customer-facing wall",
+                    "created_at": created,
+                },
+                {
+                    "id": str(ObjectId()),
+                    "side_name": "Left Product Wall",
+                    "width": 12,
+                    "height": 10,
+                    "unit": "ft",
+                    "yaw": -92,
+                    "pitch": 0,
+                    "remarks": "Exterior/interior wall shelf zone",
+                    "created_at": created,
+                },
+                {
+                    "id": str(ObjectId()),
+                    "side_name": "Right Branding Wall",
+                    "width": 12,
+                    "height": 10,
+                    "unit": "ft",
+                    "yaw": 62,
+                    "pitch": 1,
+                    "remarks": "Round Walltron display zone",
+                    "created_at": created,
+                },
+                {
+                    "id": str(ObjectId()),
+                    "side_name": "Ceiling Height",
+                    "width": 18,
+                    "height": 10,
+                    "unit": "ft",
+                    "yaw": 0,
+                    "pitch": 46,
+                    "remarks": "Overall height reference",
+                    "created_at": created,
+                },
+            ],
+            "fixtures": [
+                {
+                    "id": str(ObjectId()),
+                    "fixture_name": "Premium Wall Shelf",
+                    "fixture_type": "Wall Display",
+                    "width": 8,
+                    "height": 7,
+                    "depth": 1,
+                    "unit": "ft",
+                    "yaw": -38,
+                    "pitch": -4,
+                    "scale": 1.1,
+                    "color": "#CF1E01",
+                    "remarks": "Proposed shelf fixture",
+                    "created_at": created,
+                },
+                {
+                    "id": str(ObjectId()),
+                    "fixture_name": "Circular Product Island",
+                    "fixture_type": "Center Display",
+                    "width": 6,
+                    "height": 6,
+                    "depth": 2,
+                    "unit": "ft",
+                    "yaw": 50,
+                    "pitch": -5,
+                    "scale": 1.0,
+                    "color": "#101828",
+                    "remarks": "Hero product display",
+                    "created_at": created,
+                },
+            ],
+            "feedback": [],
+            "created_at": created,
+            "updated_at": created,
+        })
 
 
 @app.on_event("startup")
 def startup() -> None:
-    execute_schema()
-    seed_data()
+    try:
+        mongo_client.admin.command("ping")
+        setup_indexes()
+        seed_data()
+    except PyMongoError as exc:
+        raise RuntimeError(f"Could not connect to MongoDB. Check MONGODB_URI. Details: {exc}") from exc
 
 
 class LoginRequest(BaseModel):
@@ -301,70 +293,64 @@ def require_admin(authorization: str | None = Header(default=None)) -> dict[str,
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing authorization token")
     token = authorization.removeprefix("Bearer ").strip()
-    with get_db() as conn:
-        row = conn.execute(
-            """
-            SELECT users.id, users.name, users.email, users.role
-            FROM sessions
-            JOIN users ON users.id = sessions.user_id
-            WHERE sessions.token = ?
-            """,
-            (token,),
-        ).fetchone()
-    if row is None:
+    session = db.sessions.find_one({"token": token})
+    if session is None:
         raise HTTPException(status_code=401, detail="Invalid session")
-    return row_to_dict(row) or {}
+    user = db.users.find_one({"_id": session["user_id"]})
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    return {"id": str(user["_id"]), "name": user["name"], "email": user["email"], "role": user["role"]}
 
 
-def project_payload(project: sqlite3.Row) -> dict[str, Any]:
-    data = row_to_dict(project) or {}
-    data["panorama_url"] = f"/uploads/{data['panorama_filename']}"
-    return data
+def project_payload(project: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(project["_id"]),
+        "unique_code": project.get("unique_code"),
+        "project_name": project.get("project_name"),
+        "client_name": project.get("client_name"),
+        "client_phone": project.get("client_phone", ""),
+        "location": project.get("location", ""),
+        "panorama_filename": project.get("panorama_filename"),
+        "panorama_url": f"/uploads/{project.get('panorama_filename')}",
+        "shop_width": project.get("shop_width"),
+        "shop_length": project.get("shop_length"),
+        "shop_height": project.get("shop_height"),
+        "unit": project.get("unit", "ft"),
+        "status": project.get("status", "draft"),
+        "created_at": project.get("created_at"),
+        "updated_at": project.get("updated_at"),
+    }
 
 
-def full_project_payload(project_id: int, public_base_url: str = "") -> dict[str, Any]:
-    with get_db() as conn:
-        project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
-        measurements = conn.execute(
-            "SELECT * FROM measurements WHERE project_id = ? ORDER BY id ASC", (project_id,)
-        ).fetchall()
-        fixtures = conn.execute(
-            "SELECT * FROM fixtures WHERE project_id = ? ORDER BY id ASC", (project_id,)
-        ).fetchall()
-        feedback_rows = conn.execute(
-            "SELECT * FROM feedback WHERE project_id = ? ORDER BY id DESC", (project_id,)
-        ).fetchall()
-
+def full_project_payload(project_id: str | ObjectId, public_base_url: str = "") -> dict[str, Any]:
+    oid = project_id if isinstance(project_id, ObjectId) else object_id(project_id)
+    project = db.projects.find_one({"_id": oid})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
     data = project_payload(project)
     data["panorama_url"] = public_base_url + data["panorama_url"]
-    data["measurements"] = [row_to_dict(row) for row in measurements]
-    data["fixtures"] = [row_to_dict(row) for row in fixtures]
-    data["feedback"] = [row_to_dict(row) for row in feedback_rows]
+    data["measurements"] = project.get("measurements", [])
+    data["fixtures"] = project.get("fixtures", [])
+    data["feedback"] = sorted(project.get("feedback", []), key=lambda item: item.get("created_at", ""), reverse=True)
     return data
 
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    mongo_client.admin.command("ping")
+    return {"status": "ok", "database": "mongodb"}
 
 
 @app.post("/api/admin/login")
 def login(body: LoginRequest) -> dict[str, Any]:
-    with get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE email = ?", (body.email.lower().strip(),)).fetchone()
-        if user is None or user["password_hash"] != hash_password(body.password):
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-        token = secrets.token_urlsafe(32)
-        conn.execute(
-            "INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)",
-            (token, user["id"], now_iso()),
-        )
-        conn.commit()
+    user = db.users.find_one({"email": body.email.lower().strip()})
+    if user is None or user["password_hash"] != hash_password(body.password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = secrets.token_urlsafe(32)
+    db.sessions.insert_one({"token": token, "user_id": user["_id"], "created_at": now_iso()})
     return {
         "token": token,
-        "user": {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]},
+        "user": {"id": str(user["_id"]), "name": user["name"], "email": user["email"], "role": user["role"]},
     }
 
 
@@ -375,8 +361,7 @@ def me(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
 
 @app.get("/api/admin/projects")
 def list_projects(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
-    with get_db() as conn:
-        rows = conn.execute("SELECT * FROM projects ORDER BY id DESC").fetchall()
+    rows = list(db.projects.find({}).sort("created_at", DESCENDING))
     return {"projects": [project_payload(row) for row in rows]}
 
 
@@ -395,7 +380,6 @@ def create_project(
 ) -> dict[str, Any]:
     if not panorama.filename:
         raise HTTPException(status_code=400, detail="Panorama image is required")
-
     content_type = panorama.content_type or ""
     if not content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Only image uploads are allowed")
@@ -405,51 +389,41 @@ def create_project(
     with filepath.open("wb") as out_file:
         shutil.copyfileobj(panorama.file, out_file)
 
-    with get_db() as conn:
+    created = now_iso()
+    for _ in range(10):
         code = generate_code()
-        while conn.execute("SELECT id FROM projects WHERE unique_code = ?", (code,)).fetchone() is not None:
-            code = generate_code()
-        created = now_iso()
-        cursor = conn.execute(
-            """
-            INSERT INTO projects (
-                unique_code, project_name, client_name, client_phone, location,
-                panorama_filename, shop_width, shop_length, shop_height, unit,
-                status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                code,
-                project_name,
-                client_name,
-                client_phone,
-                location,
-                filename,
-                shop_width,
-                shop_length,
-                shop_height,
-                unit,
-                "draft",
-                created,
-                created,
-            ),
-        )
-        conn.commit()
-        project_id = cursor.lastrowid
-    return {"project": full_project_payload(project_id)}
+        try:
+            result = db.projects.insert_one({
+                "unique_code": code,
+                "project_name": project_name,
+                "client_name": client_name,
+                "client_phone": client_phone,
+                "location": location,
+                "panorama_filename": filename,
+                "shop_width": shop_width,
+                "shop_length": shop_length,
+                "shop_height": shop_height,
+                "unit": unit,
+                "status": "draft",
+                "measurements": [],
+                "fixtures": [],
+                "feedback": [],
+                "created_at": created,
+                "updated_at": created,
+            })
+            return {"project": full_project_payload(result.inserted_id)}
+        except DuplicateKeyError:
+            continue
+    raise HTTPException(status_code=500, detail="Could not generate a unique preview code")
 
 
 @app.get("/api/admin/projects/{project_id}")
-def get_project(project_id: int, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+def get_project(project_id: str, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
     return {"project": full_project_payload(project_id)}
 
 
 @app.put("/api/admin/projects/{project_id}")
-def update_project(
-    project_id: int,
-    body: ProjectUpdate,
-    user: dict[str, Any] = Depends(require_admin),
-) -> dict[str, Any]:
+def update_project(project_id: str, body: ProjectUpdate, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         return {"project": full_project_payload(project_id)}
@@ -466,25 +440,18 @@ def update_project(
     }
     updates = {key: value for key, value in fields.items() if key in allowed}
     updates["updated_at"] = now_iso()
-    set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
-    values = list(updates.values()) + [project_id]
-    with get_db() as conn:
-        exists = conn.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if exists is None:
-            raise HTTPException(status_code=404, detail="Project not found")
-        conn.execute(f"UPDATE projects SET {set_clause} WHERE id = ?", values)
-        conn.commit()
+    result = db.projects.update_one({"_id": object_id(project_id)}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
     return {"project": full_project_payload(project_id)}
 
 
 @app.delete("/api/admin/projects/{project_id}")
-def delete_project(project_id: int, user: dict[str, Any] = Depends(require_admin)) -> dict[str, str]:
-    with get_db() as conn:
-        project = conn.execute("SELECT panorama_filename FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
-        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-        conn.commit()
+def delete_project(project_id: str, user: dict[str, Any] = Depends(require_admin)) -> dict[str, str]:
+    project = db.projects.find_one({"_id": object_id(project_id)})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    db.projects.delete_one({"_id": object_id(project_id)})
     file_path = UPLOAD_DIR / project["panorama_filename"]
     if file_path.exists() and project["panorama_filename"] != "walltron-demo.jpeg":
         file_path.unlink(missing_ok=True)
@@ -492,148 +459,93 @@ def delete_project(project_id: int, user: dict[str, Any] = Depends(require_admin
 
 
 @app.post("/api/admin/projects/{project_id}/measurements")
-def add_measurement(
-    project_id: int,
-    body: MeasurementCreate,
-    user: dict[str, Any] = Depends(require_admin),
-) -> dict[str, Any]:
-    with get_db() as conn:
-        if conn.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
-            raise HTTPException(status_code=404, detail="Project not found")
-        conn.execute(
-            """
-            INSERT INTO measurements
-            (project_id, side_name, width, height, unit, yaw, pitch, remarks, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                project_id,
-                body.side_name,
-                body.width,
-                body.height,
-                body.unit,
-                body.yaw,
-                body.pitch,
-                body.remarks,
-                now_iso(),
-            ),
-        )
-        conn.commit()
+def add_measurement(project_id: str, body: MeasurementCreate, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    item = body.model_dump()
+    item["id"] = str(ObjectId())
+    item["created_at"] = now_iso()
+    result = db.projects.update_one(
+        {"_id": object_id(project_id)},
+        {"$push": {"measurements": item}, "$set": {"updated_at": now_iso()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
     return {"project": full_project_payload(project_id)}
 
 
 @app.put("/api/admin/measurements/{measurement_id}")
-def update_measurement(
-    measurement_id: int,
-    body: MeasurementUpdate,
-    user: dict[str, Any] = Depends(require_admin),
-) -> dict[str, Any]:
+def update_measurement(measurement_id: str, body: MeasurementUpdate, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
     fields = body.model_dump(exclude_unset=True)
-    if not fields:
-        with get_db() as conn:
-            row = conn.execute("SELECT project_id FROM measurements WHERE id = ?", (measurement_id,)).fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="Measurement not found")
-            return {"project": full_project_payload(row["project_id"])}
-
-    allowed = {"side_name", "width", "height", "unit", "yaw", "pitch", "remarks"}
-    updates = {key: value for key, value in fields.items() if key in allowed}
-    set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
-    values = list(updates.values()) + [measurement_id]
-
-    with get_db() as conn:
-        row = conn.execute("SELECT project_id FROM measurements WHERE id = ?", (measurement_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Measurement not found")
-        project_id = row["project_id"]
-        conn.execute(f"UPDATE measurements SET {set_clause} WHERE id = ?", values)
-        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now_iso(), project_id))
-        conn.commit()
-    return {"project": full_project_payload(project_id)}
+    project = db.projects.find_one({"measurements.id": measurement_id})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Measurement not found")
+    if fields:
+        allowed = {"side_name", "width", "height", "unit", "yaw", "pitch", "remarks"}
+        updates = {f"measurements.$.{key}": value for key, value in fields.items() if key in allowed}
+        updates["updated_at"] = now_iso()
+        db.projects.update_one({"measurements.id": measurement_id}, {"$set": updates})
+    return {"project": full_project_payload(project["_id"])}
 
 
 @app.delete("/api/admin/measurements/{measurement_id}")
-def delete_measurement(measurement_id: int, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
-    with get_db() as conn:
-        row = conn.execute("SELECT project_id FROM measurements WHERE id = ?", (measurement_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Measurement not found")
-        project_id = row["project_id"]
-        conn.execute("DELETE FROM measurements WHERE id = ?", (measurement_id,))
-        conn.commit()
-    return {"project": full_project_payload(project_id)}
+def delete_measurement(measurement_id: str, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    project = db.projects.find_one({"measurements.id": measurement_id})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Measurement not found")
+    db.projects.update_one(
+        {"_id": project["_id"]},
+        {"$pull": {"measurements": {"id": measurement_id}}, "$set": {"updated_at": now_iso()}},
+    )
+    return {"project": full_project_payload(project["_id"])}
 
 
 @app.post("/api/admin/projects/{project_id}/fixtures")
-def add_fixture(
-    project_id: int,
-    body: FixtureCreate,
-    user: dict[str, Any] = Depends(require_admin),
-) -> dict[str, Any]:
-    with get_db() as conn:
-        if conn.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
-            raise HTTPException(status_code=404, detail="Project not found")
-        conn.execute(
-            """
-            INSERT INTO fixtures
-            (project_id, fixture_name, fixture_type, width, height, depth, unit, yaw, pitch, scale, color, remarks, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                project_id,
-                body.fixture_name,
-                body.fixture_type,
-                body.width,
-                body.height,
-                body.depth,
-                body.unit,
-                body.yaw,
-                body.pitch,
-                body.scale,
-                body.color,
-                body.remarks,
-                now_iso(),
-            ),
-        )
-        conn.commit()
+def add_fixture(project_id: str, body: FixtureCreate, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    item = body.model_dump()
+    item["id"] = str(ObjectId())
+    item["created_at"] = now_iso()
+    result = db.projects.update_one(
+        {"_id": object_id(project_id)},
+        {"$push": {"fixtures": item}, "$set": {"updated_at": now_iso()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
     return {"project": full_project_payload(project_id)}
 
 
 @app.delete("/api/admin/fixtures/{fixture_id}")
-def delete_fixture(fixture_id: int, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
-    with get_db() as conn:
-        row = conn.execute("SELECT project_id FROM fixtures WHERE id = ?", (fixture_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Fixture not found")
-        project_id = row["project_id"]
-        conn.execute("DELETE FROM fixtures WHERE id = ?", (fixture_id,))
-        conn.commit()
-    return {"project": full_project_payload(project_id)}
+def delete_fixture(fixture_id: str, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    project = db.projects.find_one({"fixtures.id": fixture_id})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+    db.projects.update_one(
+        {"_id": project["_id"]},
+        {"$pull": {"fixtures": {"id": fixture_id}}, "$set": {"updated_at": now_iso()}},
+    )
+    return {"project": full_project_payload(project["_id"])}
 
 
 @app.get("/api/public/projects/{unique_code}")
 def get_public_project(unique_code: str) -> dict[str, Any]:
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT id FROM projects WHERE UPPER(unique_code) = UPPER(?)",
-            (unique_code.strip(),),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Preview code not found")
-    return {"project": full_project_payload(row["id"], public_base_url=PUBLIC_BASE_URL)}
+    code = unique_code.strip().upper()
+    project = db.projects.find_one({"unique_code": code})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Preview code not found")
+    return {"project": full_project_payload(project["_id"], public_base_url=PUBLIC_BASE_URL)}
 
 
 @app.post("/api/public/projects/{unique_code}/feedback")
 def add_public_feedback(unique_code: str, body: FeedbackCreate) -> dict[str, str]:
-    with get_db() as conn:
-        project = conn.execute("SELECT id FROM projects WHERE UPPER(unique_code) = UPPER(?)", (unique_code.strip(),)).fetchone()
-        if project is None:
-            raise HTTPException(status_code=404, detail="Preview code not found")
-        conn.execute(
-            "INSERT INTO feedback (project_id, name, message, status, created_at) VALUES (?, ?, ?, ?, ?)",
-            (project["id"], body.name, body.message, "new", now_iso()),
-        )
-        conn.commit()
+    code = unique_code.strip().upper()
+    feedback = {
+        "id": str(ObjectId()),
+        "name": body.name,
+        "message": body.message,
+        "status": "new",
+        "created_at": now_iso(),
+    }
+    result = db.projects.update_one({"unique_code": code}, {"$push": {"feedback": feedback}, "$set": {"updated_at": now_iso()}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Preview code not found")
     return {"message": "Feedback submitted"}
 
 

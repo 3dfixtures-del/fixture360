@@ -3,18 +3,24 @@ services:
     name: fixture360-api
     runtime: python
     rootDir: backend
-    plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /api/health
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.14.3
+      - key: MONGODB_DB
+        value: fixture360
+      - key: DATA_DIR
+        value: /var/data
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: PUBLIC_BASE_URL
+        value: https://fixture360-api.onrender.com
+      - key: CORS_ORIGINS
+        value: http://localhost:5173
+      - key: MONGODB_URI
+        sync: false
     disk:
       name: fixture360-data
       mountPath: /var/data
       sizeGB: 1
-    envVars:
-      - key: DATA_DIR
-        value: /var/data
-      - key: PUBLIC_BASE_URL
-        sync: false
-      - key: CORS_ORIGINS
-        sync: false

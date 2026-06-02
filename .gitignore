@@ -1,20 +1,6 @@
-# Python
-__pycache__/
-*.pyc
-venv/
-.env
-
-# Node
-node_modules/
-dist/
-.env.local
-
-# Database / uploads
-*.db
-data/
-uploads/
-backend/data/
-backend/uploads/
-
-# Mac
+backend/venv/
+backend/__pycache__/
+backend/*.db
+frontend/node_modules/
+frontend/dist/
 .DS_Store

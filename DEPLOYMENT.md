@@ -1,67 +1,108 @@
-# Fixture360 Deployment Guide
+# ADINN Fixture360 MongoDB Deployment Guide
 
-Recommended setup:
-- Backend API: Render Web Service
-- Frontend: Vercel Vite app
+This version uses MongoDB instead of SQLite.
 
-## Backend on Render
+## 1. Create MongoDB Atlas Database
 
-Use these settings if creating the service manually:
+1. Create a MongoDB Atlas account.
+2. Create a project and a free/shared cluster.
+3. Create a database user.
+4. Add your Render outbound IP access rule or allow network access for deployment testing.
+5. Copy the connection string.
 
-- Runtime: Python
-- Root Directory: `backend`
-- Build Command: `pip install -r requirements.txt`
-- Start Command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
-- Health Check Path: `/api/health`
+Example connection string:
+
+```text
+mongodb+srv://USERNAME:PASSWORD@CLUSTER.mongodb.net/?retryWrites=true&w=majority
+```
+
+## 2. Push Project to GitHub
+
+```bash
+git add .
+git commit -m "Convert Fixture360 backend to MongoDB"
+git push
+```
+
+## 3. Deploy Backend on Render
+
+Create a new Web Service using your GitHub repository.
+
+Settings:
+
+```text
+Name: fixture360-api
+Root Directory: backend
+Runtime: Python
+Build Command: pip install -r requirements.txt
+Start Command: python app.py
+```
 
 Environment variables:
 
 ```env
+PYTHON_VERSION=3.14.3
+MONGODB_URI=your_mongodb_atlas_connection_string
+MONGODB_DB=fixture360
 DATA_DIR=/var/data
-PUBLIC_BASE_URL=https://YOUR-BACKEND-NAME.onrender.com
-CORS_ORIGINS=https://YOUR-FRONTEND-NAME.vercel.app,http://localhost:5173
+UPLOAD_DIR=/var/data/uploads
+PUBLIC_BASE_URL=https://fixture360-api.onrender.com
+CORS_ORIGINS=http://localhost:5173,https://YOUR-FRONTEND.vercel.app
 ```
 
-Attach a persistent disk:
+Add a persistent disk for panorama uploads:
 
-- Mount path: `/var/data`
-- Size: 1 GB or more
+```text
+Name: fixture360-data
+Mount Path: /var/data
+Size: 1 GB
+```
 
-## Frontend on Vercel
+Test backend:
 
-Use these settings:
+```text
+https://fixture360-api.onrender.com/api/health
+```
 
-- Framework: Vite
-- Root Directory: `frontend`
-- Build Command: `npm run build`
-- Output Directory: `dist`
+Expected response:
+
+```json
+{"status":"ok","database":"mongodb"}
+```
+
+## 4. Deploy Frontend on Vercel
+
+Import the same GitHub repository in Vercel.
+
+Settings:
+
+```text
+Root Directory: frontend
+Framework: Vite
+Build Command: npm run build
+Output Directory: dist
+```
 
 Environment variable:
 
 ```env
-VITE_API_URL=https://YOUR-BACKEND-NAME.onrender.com
+VITE_API_URL=https://fixture360-api.onrender.com
 ```
 
-After setting or changing `VITE_API_URL`, redeploy the frontend.
+After frontend deployment, update Render:
 
-## Local testing before deployment
-
-Backend:
-
-```bash
-cd backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python app.py
+```env
+CORS_ORIGINS=https://YOUR-FRONTEND.vercel.app,http://localhost:5173
 ```
 
-Frontend:
+Then redeploy backend.
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+## 5. Production Checklist
 
-Open `http://localhost:5173`.
+- Change default admin password.
+- Restrict MongoDB network access.
+- Use a strong MongoDB username and password.
+- Use Render persistent disk or object storage for panorama images.
+- Set `PUBLIC_BASE_URL` to the final backend URL.
+- Set `CORS_ORIGINS` to the final frontend URL only.
+- Test admin login, project creation, panorama upload, preview code, measurements, fixtures, and feedback.

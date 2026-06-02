@@ -718,73 +718,11 @@ code, .codeDisplay {
   }
 }
 
-
-.appLogo {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 18px;
-}
-
-.appLogo img {
-  height: 74px;
-  width: auto;
-  max-width: 360px;
-  object-fit: contain;
-}
-
-.appLogo.compact {
-  justify-content: flex-start;
-  margin-bottom: 12px;
-}
-
-.appLogo.compact img {
-  height: 46px;
-  max-width: 220px;
-}
-
-.topBar .appLogo {
-  margin-bottom: 8px;
-}
-
-.loginCard .appLogo {
-  justify-content: center;
-}
-
-@media (max-width: 720px) {
-  .appLogo img {
-    height: 56px;
-    max-width: 280px;
-  }
-
-  .appLogo.compact img {
-    height: 38px;
-    max-width: 180px;
-  }
-}
-
-
 /* === ADINN PROFESSIONAL DEPLOYMENT POLISH === */
-
 :root {
-  --red: #CF1E01;
   --redDark: #9F1600;
-  --ink: #111318;
   --ink2: #252A33;
-  --muted: #687083;
-  --white: #FFFFFF;
-  --soft: #F5F6F8;
-  --line: rgba(17, 19, 24, 0.09);
-  --shadow: 0 28px 90px rgba(17, 19, 24, 0.14);
   --shadowSoft: 0 16px 44px rgba(17, 19, 24, 0.08);
-}
-
-body {
-  background:
-    radial-gradient(circle at 12% 10%, rgba(207, 30, 1, 0.16), transparent 28%),
-    radial-gradient(circle at 92% 6%, rgba(17, 19, 24, 0.10), transparent 30%),
-    linear-gradient(135deg, #ffffff 0%, #f7f8fb 46%, #eef1f5 100%);
-  color: var(--ink);
 }
 
 body::before {
@@ -793,36 +731,10 @@ body::before {
   inset: 0;
   pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(207, 30, 1, 0.06) 0 1px, transparent 1px 100%),
-    linear-gradient(180deg, rgba(17, 19, 24, 0.035) 0 1px, transparent 1px 100%);
+    linear-gradient(90deg, rgba(207, 30, 1, 0.045) 0 1px, transparent 1px 100%),
+    linear-gradient(180deg, rgba(17, 19, 24, 0.03) 0 1px, transparent 1px 100%);
   background-size: 72px 72px;
-  mask-image: linear-gradient(to bottom, rgba(0,0,0,0.45), transparent 65%);
-}
-
-.landing {
-  position: relative;
-  padding: 36px;
-}
-
-.landing::after {
-  content: "";
-  position: fixed;
-  right: -140px;
-  bottom: -140px;
-  width: 420px;
-  height: 420px;
-  border-radius: 50%;
-  background: rgba(207, 30, 1, 0.10);
-  filter: blur(6px);
-  pointer-events: none;
-}
-
-.glassCard,
-.panelCard {
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(24px);
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,0.4), transparent 68%);
 }
 
 .landingCard {
@@ -850,9 +762,9 @@ body::before {
 
 .appLogo img {
   display: block;
-  height: 78px;
+  height: 64px;
   width: auto;
-  max-width: 390px;
+  max-width: 320px;
   object-fit: contain;
 }
 
@@ -862,16 +774,15 @@ body::before {
 }
 
 .appLogo.compact img {
-  height: 46px;
-  max-width: 250px;
+  height: 40px;
+  max-width: 210px;
 }
 
 .loginCard .appLogo {
   justify-content: center;
 }
 
-.brandPill,
-.statusPill {
+.brandPill {
   border: 1px solid rgba(207, 30, 1, 0.16);
   background: rgba(207, 30, 1, 0.075);
   color: var(--red);
@@ -880,33 +791,15 @@ body::before {
   font-size: 12px;
 }
 
-.statusPill {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: white;
-}
-
-.landing h1,
-.topBar h1 {
+.landing h1, .topBar h1 {
   color: var(--ink);
   font-weight: 950;
   letter-spacing: -0.065em;
 }
 
-.landing h1 {
-  max-width: 640px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-.lead {
-  color: var(--muted);
-  font-size: 18px;
-}
-
 .codeForm {
   background: #ffffff;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(17, 19, 24, 0.09);
   border-radius: 26px;
   padding: 18px;
   box-shadow: var(--shadowSoft);
@@ -918,29 +811,16 @@ body::before {
   background: #fafbfc;
 }
 
+.codeForm input::placeholder {
+  color: #9aa1ad;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
 .primaryBtn {
   background: linear-gradient(135deg, var(--red), var(--redDark));
   border: 1px solid rgba(207, 30, 1, 0.1);
   box-shadow: 0 16px 34px rgba(207, 30, 1, 0.28);
-}
-
-.primaryBtn:hover {
-  box-shadow: 0 20px 44px rgba(207, 30, 1, 0.34);
-}
-
-.secondaryBtn {
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid var(--line);
-  box-shadow: 0 10px 26px rgba(17, 19, 24, 0.06);
-}
-
-.linkBtn {
-  color: var(--ink2);
-  font-weight: 850;
-}
-
-.adminAccess {
-  color: var(--muted);
 }
 
 .qualityStrip {
@@ -963,139 +843,6 @@ body::before {
   font-weight: 900;
 }
 
-.appShell {
-  padding: 30px;
-}
-
-.topBar {
-  background: rgba(255, 255, 255, 0.74);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  border-radius: 28px;
-  padding: 22px 24px;
-  box-shadow: var(--shadowSoft);
-  backdrop-filter: blur(20px);
-}
-
-.topBar h1 {
-  margin-top: 8px;
-  font-size: clamp(30px, 4vw, 48px);
-}
-
-.panelCard {
-  border-radius: 26px;
-  box-shadow: var(--shadowSoft);
-}
-
-.sectionTitle h2 {
-  font-weight: 950;
-  color: var(--ink);
-}
-
-.viewerShell {
-  border-radius: 32px;
-  border: 1px solid rgba(255,255,255,0.82);
-  box-shadow: 0 30px 90px rgba(17, 19, 24, 0.20);
-}
-
-.viewerHint {
-  background: rgba(17, 19, 24, 0.76);
-  border: 1px solid rgba(255,255,255,0.18);
-}
-
-.projectRow,
-.miniItem,
-.metric,
-.uploadBox,
-.placementBox {
-  border-color: var(--line);
-  box-shadow: 0 10px 24px rgba(17, 19, 24, 0.045);
-}
-
-.projectRow:hover,
-.miniItem:hover {
-  border-color: rgba(207, 30, 1, 0.20);
-  box-shadow: 0 14px 34px rgba(17, 19, 24, 0.08);
-}
-
-.codeDisplay {
-  background:
-    linear-gradient(135deg, rgba(207, 30, 1, 0.08), rgba(17, 19, 24, 0.035));
-  border-color: rgba(207, 30, 1, 0.18);
-}
-
-.chipBtn {
-  background: rgba(207, 30, 1, 0.07);
-  border-color: rgba(207, 30, 1, 0.16);
-}
-
-.errorText,
-.errorBanner {
-  border-radius: 16px;
-}
-
-@media (max-width: 720px) {
-  .landing,
-  .appShell {
-    padding: 16px;
-  }
-
-  .landingCard,
-  .loginCard {
-    padding: 28px 22px;
-    border-radius: 28px;
-  }
-
-  .appLogo img {
-    height: 56px;
-    max-width: 290px;
-  }
-
-  .appLogo.compact img {
-    height: 38px;
-    max-width: 210px;
-  }
-
-  .topBar {
-    padding: 18px;
-    border-radius: 24px;
-  }
-
-  .qualityStrip {
-    justify-content: flex-start;
-  }
-}
-
-
-/* === FINAL DEPLOYMENT CLEANUP === */
-
-.appLogo {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 22px;
-}
-
-.appLogo img {
-  height: 64px;
-  width: auto;
-  max-width: 320px;
-  object-fit: contain;
-}
-
-.appLogo.compact {
-  justify-content: flex-start;
-  margin-bottom: 14px;
-}
-
-.appLogo.compact img {
-  height: 40px;
-  max-width: 210px;
-}
-
-.loginCard .appLogo {
-  justify-content: center;
-}
-
 .demoStrip {
   display: none !important;
 }
@@ -1106,18 +853,32 @@ body::before {
   font-size: 14px;
 }
 
-.codeForm input::placeholder {
-  color: #9aa1ad;
+.topBar {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 28px;
+  box-shadow: var(--shadowSoft);
+  backdrop-filter: blur(20px);
+}
+
+.panelCard, .projectRow, .miniItem, .metric, .uploadBox, .placementBox {
+  box-shadow: 0 10px 24px rgba(17, 19, 24, 0.045);
 }
 
 @media (max-width: 720px) {
+  .landingCard, .loginCard {
+    padding: 28px 22px;
+    border-radius: 28px;
+  }
   .appLogo img {
     height: 50px;
     max-width: 260px;
   }
-
   .appLogo.compact img {
     height: 34px;
     max-width: 180px;
+  }
+  .qualityStrip {
+    justify-content: flex-start;
   }
 }

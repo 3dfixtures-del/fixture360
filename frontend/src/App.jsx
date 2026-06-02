@@ -123,10 +123,10 @@ function HomeScreen({ onAdmin, onProject }) {
           <label htmlFor="previewCode">Unique preview code</label>
           <input
             id="previewCode"
-            autoComplete="off"
             value={code}
             onChange={(event) => setCode(event.target.value.toUpperCase())}
             placeholder="Enter preview code"
+            autoComplete="off"
             autoFocus
           />
           {error ? <div className="errorText">{error}</div> : null}
@@ -135,11 +135,6 @@ function HomeScreen({ onAdmin, onProject }) {
             {loading ? 'Opening Preview...' : 'View Preview'}
           </button>
         </form>
-
-        <div className="demoStrip">
-          <span>Try sample:</span>
-          <button type="button" onClick={() => setCode('DEMO360')}>DEMO360</button>
-        </div>
 
         <QualityStrip />
 
