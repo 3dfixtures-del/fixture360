@@ -23,6 +23,14 @@ function absoluteUrl(url) {
   return `${API_BASE}${url}`;
 }
 
+function BrandLogo({ compact = false }) {
+  return (
+    <div className={compact ? 'appLogo compact' : 'appLogo'}>
+      <img src="/adinn-logo.png" alt="ADINN Advertising Services Ltd." />
+    </div>
+  );
+}
+
 function formatDate(value) {
   if (!value) return '';
   try {
@@ -94,6 +102,7 @@ function HomeScreen({ onAdmin, onProject }) {
   return (
     <main className="landing">
       <section className="landingCard glassCard">
+        <BrandLogo />
         <div className="brandPill">Fixture360 Preview</div>
         <h1>View your shop fixture result</h1>
         <p className="lead">
@@ -155,6 +164,7 @@ function AdminLogin({ onLogin, onBack }) {
     <main className="landing compactLanding">
       <section className="glassCard loginCard">
         <button className="linkBtn" onClick={onBack} type="button"><ArrowLeft size={16} /> Back</button>
+        <BrandLogo compact />
         <div className="iconBadge"><LayoutDashboard size={22} /></div>
         <h1>Admin Login</h1>
         <p className="muted">Create panorama projects, add measurements, place fixture previews, and share unique client codes.</p>
@@ -201,6 +211,7 @@ function ClientPreview({ project, onBack }) {
     <main className="appShell">
       <header className="topBar">
         <div>
+          <BrandLogo compact />
           <button className="linkBtn" onClick={onBack} type="button"><ArrowLeft size={16} /> Back to code screen</button>
           <h1>{project.project_name}</h1>
           <p>{project.client_name} • {project.location || 'Location not added'} • Code: <strong>{project.unique_code}</strong></p>
@@ -306,6 +317,7 @@ function AdminDashboard({ onLogout }) {
     <main className="appShell adminShell">
       <header className="topBar">
         <div>
+          <BrandLogo compact />
           <div className="brandPill">Admin Workspace</div>
           <h1>Fixture360 Projects</h1>
           <p>Create a client project, upload panorama, add measurements, and share the unique code.</p>
@@ -473,6 +485,7 @@ function ProjectEditor({ projectId, onBack, onLogout }) {
     <main className="appShell adminShell">
       <header className="topBar">
         <div>
+          <BrandLogo compact />
           <button className="linkBtn" onClick={onBack} type="button"><ArrowLeft size={16} /> Back to projects</button>
           <h1>{project.project_name}</h1>
           <p>{project.client_name} • Code: <strong>{project.unique_code}</strong> • Created {formatDate(project.created_at)}</p>
