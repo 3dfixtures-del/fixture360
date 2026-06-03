@@ -10,14 +10,33 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from bson import ObjectId
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from pymongo import ASCENDING, DESCENDING, MongoClient
-from pymongo.database import Database
-from pymongo.errors import DuplicateKeyError, PyMongoError
+import json
+from copy import deepcopy
+from dataclasses import dataclass
+
+import psycopg
+from psycopg.rows import dict_row
+
+ASCENDING = 1
+DESCENDING = -1
+
+
+class DuplicateKeyError(Exception):
+    pass
+
+
+class ObjectId(str):
+    def __new__(cls, value: str | None = None):
+        return str.__new__(cls, value or secrets.token_hex(12))
+
+    @staticmethod
+    def is_valid(value: str) -> bool:
+        return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-fA-F]{24}", value))
+
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -25,8 +44,10 @@ DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR))).resolve()
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(DATA_DIR / "uploads"))).resolve()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
 
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-MONGODB_DB = os.getenv("MONGODB_DB", "fixture360")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
+if not DATABASE_URL:
+    # Local PostgreSQL fallback. For Neon, set DATABASE_URL in the terminal or hosting dashboard.
+    DATABASE_URL = "postgresql://localhost:5432/fixture360"
 
 ADMIN_EMAIL = "adminfixtures@adinn.co.in"
 LEGACY_ADMIN_EMAIL = "admin@fixture360.local"
@@ -34,10 +55,237 @@ LEGACY_ADMIN_EMAIL = "admin@fixture360.local"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-db: Database = mongo_client[MONGODB_DB]
 
-app = FastAPI(title="Fixture360 API", version="3.1.0")
+@dataclass
+class InsertOneResult:
+    inserted_id: str
+
+
+@dataclass
+class UpdateResult:
+    matched_count: int
+    modified_count: int = 0
+
+
+@dataclass
+class DeleteResult:
+    deleted_count: int
+
+
+class PostgresCursor(list):
+    def sort(self, field: str, direction: int):
+        reverse = direction == DESCENDING
+        return PostgresCursor(sorted(self, key=lambda row: row.get(field) or "", reverse=reverse))
+
+
+def _normalize_doc(value: Any) -> Any:
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _normalize_doc(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_doc(v) for v in value]
+    return value
+
+
+def _nested_get(doc: dict[str, Any], dotted: str) -> Any:
+    current: Any = doc
+    for part in dotted.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def _matches(doc: dict[str, Any], query: dict[str, Any] | None) -> bool:
+    if not query:
+        return True
+    for key, expected in query.items():
+        expected = str(expected) if isinstance(expected, ObjectId) else expected
+        if "." in key:
+            first, rest = key.split(".", 1)
+            array_value = doc.get(first)
+            if isinstance(array_value, list):
+                if not any(_nested_get(item, rest) == expected for item in array_value if isinstance(item, dict)):
+                    return False
+            else:
+                if _nested_get(doc, key) != expected:
+                    return False
+        else:
+            actual = doc.get(key)
+            if isinstance(actual, ObjectId):
+                actual = str(actual)
+            if actual != expected:
+                return False
+    return True
+
+
+def _set_nested(doc: dict[str, Any], dotted: str, value: Any, filter_query: dict[str, Any] | None = None) -> None:
+    if ".$." in dotted:
+        array_name, rest = dotted.split(".$.", 1)
+        array_value = doc.get(array_name, [])
+        target_id = None
+        if filter_query:
+            target_id = filter_query.get(f"{array_name}.id")
+        if isinstance(array_value, list):
+            for item in array_value:
+                if isinstance(item, dict) and (target_id is None or item.get("id") == target_id):
+                    item[rest] = value
+                    break
+        return
+    parts = dotted.split(".")
+    current = doc
+    for part in parts[:-1]:
+        current = current.setdefault(part, {})
+    current[parts[-1]] = value
+
+
+class PostgresCollection:
+    def __init__(self, store: "PostgresStore", name: str):
+        self.store = store
+        self.name = name
+
+    def create_index(self, *args, **kwargs) -> None:
+        return None
+
+    def _all_docs(self) -> list[dict[str, Any]]:
+        with self.store.connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT id, doc FROM {self.name}")
+            rows = cur.fetchall()
+        docs = []
+        for row in rows:
+            doc = row["doc"]
+            if isinstance(doc, str):
+                doc = json.loads(doc)
+            doc["_id"] = row["id"]
+            docs.append(doc)
+        return docs
+
+    def _save_doc(self, doc: dict[str, Any]) -> None:
+        doc = _normalize_doc(deepcopy(doc))
+        doc_id = str(doc.get("_id") or ObjectId())
+        doc["_id"] = doc_id
+        with self.store.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {self.name} (id, doc) VALUES (%s, %s::jsonb) "
+                f"ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc",
+                (doc_id, json.dumps(doc)),
+            )
+
+    def _ensure_unique(self, doc: dict[str, Any], old_id: str | None = None) -> None:
+        if self.name == "users":
+            for field in ("email", "employee_id"):
+                value = doc.get(field)
+                if not value:
+                    continue
+                existing = self.find_one({field: value})
+                if existing and str(existing.get("_id")) != str(old_id or doc.get("_id")):
+                    raise DuplicateKeyError(f"Duplicate {field}")
+        if self.name == "projects":
+            value = doc.get("unique_code")
+            if value:
+                existing = self.find_one({"unique_code": value})
+                if existing and str(existing.get("_id")) != str(old_id or doc.get("_id")):
+                    raise DuplicateKeyError("Duplicate unique_code")
+        if self.name == "sessions":
+            value = doc.get("token")
+            if value:
+                existing = self.find_one({"token": value})
+                if existing and str(existing.get("_id")) != str(old_id or doc.get("_id")):
+                    raise DuplicateKeyError("Duplicate token")
+
+    def find_one(self, query: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        for doc in self._all_docs():
+            if _matches(doc, query):
+                return doc
+        return None
+
+    def find(self, query: dict[str, Any] | None = None) -> PostgresCursor:
+        return PostgresCursor([doc for doc in self._all_docs() if _matches(doc, query)])
+
+    def insert_one(self, doc: dict[str, Any]) -> InsertOneResult:
+        doc = _normalize_doc(deepcopy(doc))
+        doc_id = str(doc.get("_id") or ObjectId())
+        doc["_id"] = doc_id
+        self._ensure_unique(doc, old_id=doc_id)
+        self._save_doc(doc)
+        return InsertOneResult(inserted_id=doc_id)
+
+    def update_one(self, query: dict[str, Any], update: dict[str, Any]) -> UpdateResult:
+        doc = self.find_one(query)
+        if doc is None:
+            return UpdateResult(matched_count=0, modified_count=0)
+        old_id = str(doc.get("_id"))
+        if "$set" in update:
+            for key, value in update["$set"].items():
+                _set_nested(doc, key, value, query)
+        if "$push" in update:
+            for key, value in update["$push"].items():
+                target = doc.setdefault(key, [])
+                if isinstance(value, dict) and "$each" in value:
+                    target.extend(value["$each"] or [])
+                else:
+                    target.append(value)
+        if "$pull" in update:
+            for key, criteria in update["$pull"].items():
+                target = doc.get(key, [])
+                if isinstance(target, list) and isinstance(criteria, dict):
+                    doc[key] = [item for item in target if not _matches(item, criteria)]
+        if "$inc" in update:
+            for key, amount in update["$inc"].items():
+                doc[key] = int(doc.get(key) or 0) + int(amount)
+        self._ensure_unique(doc, old_id=old_id)
+        self._save_doc(doc)
+        return UpdateResult(matched_count=1, modified_count=1)
+
+    def delete_one(self, query: dict[str, Any]) -> DeleteResult:
+        doc = self.find_one(query)
+        if doc is None:
+            return DeleteResult(deleted_count=0)
+        with self.store.connect() as conn, conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {self.name} WHERE id = %s", (str(doc["_id"]),))
+        return DeleteResult(deleted_count=1)
+
+    def delete_many(self, query: dict[str, Any]) -> DeleteResult:
+        docs = self.find(query)
+        deleted = 0
+        with self.store.connect() as conn, conn.cursor() as cur:
+            for doc in docs:
+                cur.execute(f"DELETE FROM {self.name} WHERE id = %s", (str(doc["_id"]),))
+                deleted += 1
+        return DeleteResult(deleted_count=deleted)
+
+
+class PostgresStore:
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+        self.users = PostgresCollection(self, "users")
+        self.sessions = PostgresCollection(self, "sessions")
+        self.projects = PostgresCollection(self, "projects")
+
+    def connect(self):
+        return psycopg.connect(self.database_url)
+
+    def ping(self) -> None:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+
+    def init_schema(self) -> None:
+        with self.connect() as conn, conn.cursor() as cur:
+            for table in ("users", "sessions", "projects"):
+                cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, doc JSONB NOT NULL)")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users ((lower(doc->>'email')))")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_employee_id_unique ON users ((doc->>'employee_id')) WHERE doc ? 'employee_id'")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS sessions_token_unique ON sessions ((doc->>'token'))")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS projects_unique_code_unique ON projects ((upper(doc->>'unique_code')))")
+            cur.execute("CREATE INDEX IF NOT EXISTS projects_created_at_idx ON projects ((doc->>'created_at'))")
+
+
+db = PostgresStore(DATABASE_URL)
+
+app = FastAPI(title="Fixture360 API", version="4.0.0")
 
 
 DEFAULT_PERMISSIONS = {
@@ -326,11 +574,12 @@ def seed_data() -> None:
 @app.on_event("startup")
 def startup() -> None:
     try:
-        mongo_client.admin.command("ping")
+        db.ping()
+        db.init_schema()
         setup_indexes()
         seed_data()
-    except PyMongoError as exc:
-        raise RuntimeError(f"Could not connect to MongoDB. Check MONGODB_URI. Details: {exc}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Could not connect to Neon/PostgreSQL. Check DATABASE_URL. Details: {exc}") from exc
 
 
 class LoginRequest(BaseModel):
@@ -579,8 +828,8 @@ def full_project_payload(project_id: str | ObjectId, public_base_url: str = "") 
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    mongo_client.admin.command("ping")
-    return {"status": "ok", "database": "mongodb"}
+    db.ping()
+    return {"status": "ok", "database": "neon_postgres"}
 
 
 @app.post("/api/admin/login")

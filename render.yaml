@@ -8,8 +8,6 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.14.3
-      - key: MONGODB_DB
-        value: fixture360
       - key: DATA_DIR
         value: /var/data
       - key: UPLOAD_DIR
@@ -18,7 +16,7 @@ services:
         value: https://fixture360-api.onrender.com
       - key: CORS_ORIGINS
         value: http://localhost:5173
-      - key: MONGODB_URI
+      - key: DATABASE_URL
         sync: false
     disk:
       name: fixture360-data

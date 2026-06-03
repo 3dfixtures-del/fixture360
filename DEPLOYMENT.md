@@ -1,26 +1,27 @@
-# ADINN Fixture360 MongoDB Deployment Guide
+# ADINN Fixture360 Neon PostgreSQL Deployment Guide
 
-This version uses MongoDB instead of SQLite.
+This version uses Neon PostgreSQL instead of MongoDB.
 
-## 1. Create MongoDB Atlas Database
+## 1. Create Neon PostgreSQL Database
 
-1. Create a MongoDB Atlas account.
-2. Create a project and a free/shared cluster.
-3. Create a database user.
-4. Add your Render outbound IP access rule or allow network access for deployment testing.
-5. Copy the connection string.
+1. Open Neon.
+2. Create a new project.
+3. Copy the Postgres connection string from the project dashboard/connect screen.
+4. Use the pooled or regular connection string with SSL enabled.
 
 Example connection string:
 
 ```text
-mongodb+srv://USERNAME:PASSWORD@CLUSTER.mongodb.net/?retryWrites=true&w=majority
+postgresql://USER:PASSWORD@HOST.neon.tech/DBNAME?sslmode=require
 ```
+
+This value becomes your backend `DATABASE_URL`.
 
 ## 2. Push Project to GitHub
 
 ```bash
 git add .
-git commit -m "Convert Fixture360 backend to MongoDB"
+git commit -m "Convert Fixture360 backend to Neon PostgreSQL"
 git push
 ```
 
@@ -42,15 +43,14 @@ Environment variables:
 
 ```env
 PYTHON_VERSION=3.14.3
-MONGODB_URI=your_mongodb_atlas_connection_string
-MONGODB_DB=fixture360
+DATABASE_URL=postgresql://USER:PASSWORD@HOST.neon.tech/DBNAME?sslmode=require
 DATA_DIR=/var/data
 UPLOAD_DIR=/var/data/uploads
 PUBLIC_BASE_URL=https://fixture360-api.onrender.com
 CORS_ORIGINS=http://localhost:5173,https://YOUR-FRONTEND.vercel.app
 ```
 
-Add a persistent disk for panorama uploads:
+Add a persistent disk for uploaded media files:
 
 ```text
 Name: fixture360-data
@@ -67,7 +67,7 @@ https://fixture360-api.onrender.com/api/health
 Expected response:
 
 ```json
-{"status":"ok","database":"mongodb"}
+{"status":"ok","database":"neon_postgres"}
 ```
 
 ## 4. Deploy Frontend on Vercel
@@ -100,9 +100,8 @@ Then redeploy backend.
 ## 5. Production Checklist
 
 - Change default admin password.
-- Restrict MongoDB network access.
-- Use a strong MongoDB username and password.
-- Use Render persistent disk or object storage for panorama images.
+- Keep `DATABASE_URL` private.
+- Use Render persistent disk or object storage for uploaded media.
 - Set `PUBLIC_BASE_URL` to the final backend URL.
 - Set `CORS_ORIGINS` to the final frontend URL only.
-- Test admin login, project creation, panorama upload, preview code, measurements, fixtures, and feedback.
+- Test admin login, employee CRUD, project creation, media upload, preview code validity, max views, measurements, fixtures, and feedback.
