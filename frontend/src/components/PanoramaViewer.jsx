@@ -295,7 +295,8 @@ export default function PanoramaViewer({
     }
 
     measurements.forEach((item) => {
-      const subtitle = `${Number(item.width || 0)} ${item.unit || 'ft'} W x ${Number(item.height || 0)} ${item.unit || 'ft'} H`;
+      const depthText = item.depth ? ` x ${Number(item.depth)} ${item.unit || 'ft'} D` : '';
+      const subtitle = `${Number(item.width || 0)} ${item.unit || 'ft'} W x ${Number(item.height || 0)} ${item.unit || 'ft'} H${depthText}`;
       const texture = makeLabelTexture({ title: item.side_name, subtitle, type: 'measurement' });
       const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
       const sprite = new THREE.Sprite(material);

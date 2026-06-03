@@ -665,3 +665,565 @@ code, .codeDisplay {
   .miniItem:has(.miniActions) { padding-right: 14px; padding-bottom: 52px; }
   .miniActions { top: auto; bottom: 10px; }
 }
+
+/* === Feature upgrade: access control, media order, viewer logs === */
+.cleanTwoCol {
+  text-align: left;
+  margin-top: 8px;
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.statusStack {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.tinyMeta {
+  margin-top: 10px !important;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.mediaTabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 18px 0 22px;
+}
+
+.mediaTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--ink-soft);
+  border-radius: 999px;
+  padding: 11px 14px;
+  font-size: 13px;
+  font-weight: 950;
+  box-shadow: 0 10px 22px rgba(17, 24, 39, 0.055);
+}
+
+.mediaTab.active {
+  background: var(--ink);
+  color: #fff;
+  border-color: var(--ink);
+}
+
+.imageViewer,
+.documentViewer,
+.mediaEmpty {
+  position: relative;
+  overflow: hidden;
+  border-radius: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: #0f172a;
+  box-shadow: 0 30px 90px rgba(17, 24, 39, 0.20);
+}
+
+.imageViewer {
+  display: grid;
+  place-items: center;
+}
+
+.imageViewer img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #111827;
+}
+
+.documentViewer iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.docOpenBtn {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  text-decoration: none;
+}
+
+.mediaEmpty {
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 900;
+}
+
+.employeePanel {
+  margin-top: 22px;
+}
+
+.employeeList {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.employeeRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(300px, 1.6fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.045);
+}
+
+.employeeRow strong,
+.employeeRow span {
+  display: block;
+}
+
+.employeeRow span {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 5px;
+}
+
+.permissionGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.compactPerms {
+  justify-content: flex-start;
+}
+
+.checkPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 11px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.055);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--ink-soft);
+}
+
+.checkPill input {
+  width: auto;
+  box-shadow: none;
+}
+
+.miniActions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@media (max-width: 1100px) {
+  .employeeRow {
+    grid-template-columns: 1fr;
+  }
+
+  .statsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .statusStack {
+    justify-items: start;
+  }
+}
+
+
+.validityEditor {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.70);
+  margin: 14px 0;
+}
+
+.validityEditor .secondaryBtn {
+  width: 100%;
+  justify-content: center;
+}
+
+/* Employee CRUD, code usage, and named media polish */
+.formSubHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(17, 19, 24, 0.08);
+  border-radius: 18px;
+  background: rgba(17, 19, 24, 0.035);
+}
+
+.employeeForm {
+  padding: 14px;
+  border: 1px solid rgba(17, 19, 24, 0.08);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.employeePermissionGrid {
+  padding: 12px;
+  border: 1px solid rgba(17, 19, 24, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.activeToggle {
+  width: fit-content;
+}
+
+.employeeRow {
+  grid-template-columns: minmax(210px, 1fr) minmax(320px, 1.7fr) minmax(180px, auto);
+  align-items: start;
+}
+
+.employeeIdentity small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.adminEmployeeRow {
+  background: linear-gradient(135deg, rgba(207, 30, 1, 0.045), rgba(255, 255, 255, 0.92));
+}
+
+.employeeActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.employeeActions .tinyBtn,
+.employeeActions .tinyDanger {
+  min-height: 36px;
+}
+
+.namedUploadGroup {
+  display: grid;
+  gap: 10px;
+}
+
+.fileNameList {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(17, 19, 24, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.fileNameField span {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileNameField input {
+  min-height: 42px;
+}
+
+.validityEditor .threeCol {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1100px) {
+  .employeeRow {
+    grid-template-columns: 1fr;
+  }
+
+  .employeeActions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .validityEditor .threeCol,
+  .employeeForm .fourCol,
+  .employeePermissionGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .formSubHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+
+/* === EMPLOYEE CRUD STABILITY AND ALIGNMENT FIX === */
+.cleanEmployeePanel {
+  display: grid;
+  gap: 18px;
+  overflow: hidden;
+}
+
+.employeeTitle {
+  align-items: flex-start;
+}
+
+.employeeTitle p {
+  margin: 6px 0 0;
+  max-width: 760px;
+}
+
+.employeeStatsGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cleanEmployeeForm {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 24px;
+  border: 1px solid rgba(17, 19, 24, 0.08);
+  background: linear-gradient(135deg, rgba(255,255,255,0.92), rgba(248,249,251,0.86));
+  box-shadow: 0 14px 34px rgba(17, 24, 39, 0.06);
+}
+
+.employeeFormHeader {
+  align-items: center;
+}
+
+.employeeFormHeader strong,
+.employeeFormHeader small {
+  display: block;
+}
+
+.employeeFormHeader small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  margin-top: 4px;
+}
+
+.employeeFormGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.employeeControlRow,
+.employeeSubmitRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.employeeSubmitRow {
+  justify-content: flex-start;
+}
+
+.permissionMatrix {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.permissionCard {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid rgba(17, 19, 24, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 950;
+  box-shadow: 0 8px 18px rgba(17, 24, 39, 0.035);
+}
+
+.permissionCard input {
+  width: auto;
+  min-height: auto;
+  box-shadow: none;
+  accent-color: var(--red);
+}
+
+.permissionCard.locked {
+  opacity: 0.74;
+  background: rgba(17, 24, 39, 0.045);
+}
+
+.employeeDirectory {
+  display: grid;
+  gap: 12px;
+}
+
+.employeeDirectoryHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink);
+}
+
+.employeeDirectoryHeader span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.cleanEmployeeList {
+  display: grid;
+  gap: 12px;
+}
+
+.employeeCard {
+  display: grid;
+  grid-template-columns: minmax(230px, 1fr) minmax(360px, 1.7fr) minmax(210px, auto);
+  gap: 16px;
+  align-items: start;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid rgba(17, 19, 24, 0.08);
+  border-radius: 22px;
+  box-shadow: 0 12px 30px rgba(17, 24, 39, 0.055);
+}
+
+.employeeCard .employeeIdentity strong,
+.employeeCard .employeeIdentity span,
+.employeeCard .employeeIdentity small {
+  display: block;
+}
+
+.employeeCard .employeeIdentity strong {
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.employeeCard .employeeIdentity span {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 6px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.employeeCard .employeeIdentity small {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--muted);
+}
+
+.compactPermissionMatrix {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.cleanEmployeeActions {
+  position: static;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cleanEmployeeActions .tinyBtn,
+.cleanEmployeeActions .tinyDanger {
+  width: auto;
+  min-width: 74px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 13px;
+  white-space: nowrap;
+}
+
+.employeeDeleteBtn {
+  background: rgba(207, 30, 1, 0.08);
+  color: var(--red);
+}
+
+.adminLock {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.06);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.successText {
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(22, 163, 74, 0.16);
+  background: rgba(22, 163, 74, 0.08);
+  color: #166534;
+  font-weight: 850;
+  font-size: 13px;
+}
+
+@media (max-width: 1180px) {
+  .employeeFormGrid,
+  .employeeStatsGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .permissionMatrix {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .employeeCard {
+    grid-template-columns: 1fr;
+  }
+
+  .cleanEmployeeActions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 720px) {
+  .employeeFormGrid,
+  .employeeStatsGrid,
+  .permissionMatrix,
+  .compactPermissionMatrix {
+    grid-template-columns: 1fr;
+  }
+
+  .employeeFormHeader,
+  .employeeDirectoryHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .cleanEmployeeForm,
+  .employeeCard {
+    padding: 14px;
+    border-radius: 20px;
+  }
+}

@@ -1,5 +1,17 @@
 # ADINN Fixture360 - MongoDB Version
 
+## Latest Feature Set
+
+- Code validity duration for every generated preview code
+- Admin login and employee login with admin-controlled CRUD permissions
+- Viewer tracking by project/code with client name and company name
+- Mandatory client name and company name before preview access
+- Project creator tracking with employee name and ID
+- Measurements support width, height, and depth
+- Multiple panoramic images creating multiple 3D view tabs
+- Media sequence: Ricky/actual image first, 2D PDF diagram second, panoramic 3D views last
+
+
 Fixture360 is a 360 degree fixture preview and measurement web application for retail spaces. This version uses MongoDB for application data and keeps panorama image files in backend storage.
 
 ## Main Features
@@ -100,7 +112,7 @@ DEMO360
 Admin login:
 
 ```text
-Email: admin@fixture360.local
+Email: adminfixtures@adinn.co.in
 Password: admin123
 ```
 
@@ -124,3 +136,8 @@ Recommended deployment:
 - Panorama image storage: Render persistent disk for MVP, object storage for production
 
 For production scalability, move uploaded image files to S3, Cloudflare R2, or another object storage service.
+
+
+## Latest update
+- Validity supports both days and hours for each preview code.
+- Project media supports Ricky/actual shop images, 2D PDF diagrams, and multiple panoramic images. Client display order is Ricky image first, 2D diagram second, panoramas last.

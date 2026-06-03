@@ -6,12 +6,12 @@ import re
 import secrets
 import shutil
 import string
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from bson import ObjectId
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -28,13 +28,28 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 MONGODB_DB = os.getenv("MONGODB_DB", "fixture360")
 
+ADMIN_EMAIL = "adminfixtures@adinn.co.in"
+LEGACY_ADMIN_EMAIL = "admin@fixture360.local"
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
 db: Database = mongo_client[MONGODB_DB]
 
-app = FastAPI(title="Fixture360 API", version="2.0.0")
+app = FastAPI(title="Fixture360 API", version="3.1.0")
+
+
+DEFAULT_PERMISSIONS = {
+    "view_project": False,
+    "create_project": False,
+    "edit_project": False,
+    "delete_project": False,
+    "publish_project": False,
+    "manage_employees": False,
+}
+
+ALL_PERMISSIONS = {key: True for key in DEFAULT_PERMISSIONS}
 
 
 def parse_cors_origins() -> list[str]:
@@ -58,8 +73,40 @@ app.add_middleware(
 )
 
 
+def now_dt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_dt().isoformat()
+
+
+def iso_from_dt(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def validate_validity(days: int, hours: int) -> tuple[int, int]:
+    days = int(days or 0)
+    hours = int(hours or 0)
+    if days < 0 or hours < 0:
+        raise HTTPException(status_code=400, detail="Validity days and hours cannot be negative")
+    if days == 0 and hours == 0:
+        raise HTTPException(status_code=400, detail="Validity must be at least 1 hour")
+    return days, hours
+
+
+def calculate_valid_until(days: int, hours: int) -> str:
+    days, hours = validate_validity(days, hours)
+    return iso_from_dt(now_dt() + timedelta(days=days, hours=hours))
 
 
 def hash_password(password: str) -> str:
@@ -71,12 +118,16 @@ def generate_code() -> str:
     return "FX-" + "".join(secrets.choice(alphabet) for _ in range(6))
 
 
-def safe_filename(filename: str) -> str:
-    name = Path(filename).name
-    stem = Path(name).stem[:48].replace(" ", "-") or "panorama"
+def clean_email(value: str) -> str:
+    return value.lower().strip()
+
+
+def safe_filename(filename: str, fallback: str = "upload") -> str:
+    name = Path(filename or fallback).name
+    stem = Path(name).stem[:48].replace(" ", "-") or fallback
     stem = re.sub(r"[^A-Za-z0-9._-]", "-", stem)
-    suffix = Path(name).suffix.lower() or ".jpg"
-    token = secrets.token_hex(4)
+    suffix = Path(name).suffix.lower() or ".bin"
+    token = secrets.token_hex(5)
     return f"{stem}-{token}{suffix}"
 
 
@@ -86,14 +137,41 @@ def object_id(value: str) -> ObjectId:
     return ObjectId(value)
 
 
+def normalized_permissions(raw: dict[str, Any] | None, role: str = "employee") -> dict[str, bool]:
+    if role == "admin":
+        return dict(ALL_PERMISSIONS)
+    data = dict(DEFAULT_PERMISSIONS)
+    if raw:
+        for key in data:
+            data[key] = bool(raw.get(key))
+    return data
+
+
+def user_payload(user: dict[str, Any]) -> dict[str, Any]:
+    role = user.get("role", "employee")
+    return {
+        "id": str(user["_id"]),
+        "employee_id": user.get("employee_id", str(user["_id"])),
+        "name": user.get("name", ""),
+        "email": user.get("email", ""),
+        "role": role,
+        "permissions": normalized_permissions(user.get("permissions"), role),
+        "is_active": bool(user.get("is_active", True)),
+        "created_at": user.get("created_at"),
+        "updated_at": user.get("updated_at"),
+    }
+
+
 def setup_indexes() -> None:
     db.users.create_index([("email", ASCENDING)], unique=True)
+    db.users.create_index([("employee_id", ASCENDING)], unique=True, sparse=True)
     db.sessions.create_index([("token", ASCENDING)], unique=True)
     db.sessions.create_index([("user_id", ASCENDING)])
     db.projects.create_index([("unique_code", ASCENDING)], unique=True)
     db.projects.create_index([("created_at", DESCENDING)])
     db.projects.create_index([("measurements.id", ASCENDING)])
     db.projects.create_index([("fixtures.id", ASCENDING)])
+    db.projects.create_index([("media.id", ASCENDING)])
 
 
 def ensure_demo_panorama() -> None:
@@ -111,113 +189,135 @@ def ensure_demo_panorama() -> None:
             return
 
 
+def media_url(filename: str | None, public_base_url: str = "") -> str:
+    if not filename:
+        return ""
+    return f"{public_base_url}/uploads/{filename}"
+
+
+def media_payload(media: dict[str, Any], public_base_url: str = "") -> dict[str, Any]:
+    item = dict(media)
+    item["url"] = media_url(item.get("filename"), public_base_url)
+    return item
+
+
+def sort_media(media: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    priority = {"site_photo": 1, "ricky_image": 2, "recce_image": 2, "diagram_pdf": 3, "panorama": 4}
+    return sorted(media or [], key=lambda item: (priority.get(item.get("type"), 99), item.get("order", 0), item.get("created_at", "")))
+
+
+def make_media_item(upload: UploadFile, media_type: str, order: int, label: str | None = None) -> dict[str, Any]:
+    if not upload or not upload.filename:
+        raise HTTPException(status_code=400, detail="Upload file is missing")
+
+    content_type = upload.content_type or ""
+    if media_type in {"site_photo", "ricky_image", "recce_image", "panorama"} and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image uploads are allowed for photos and panoramas")
+    if media_type == "diagram_pdf" and content_type not in {"application/pdf", "application/octet-stream"}:
+        if not upload.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF uploads are allowed for 2D diagrams")
+
+    fallback = "panorama" if media_type == "panorama" else "ricky" if media_type in {"ricky_image", "recce_image"} else "site-photo" if media_type == "site_photo" else "diagram"
+    filename = safe_filename(upload.filename, fallback=fallback)
+    filepath = UPLOAD_DIR / filename
+    with filepath.open("wb") as out_file:
+        shutil.copyfileobj(upload.file, out_file)
+
+    return {
+        "id": str(ObjectId()),
+        "type": media_type,
+        "label": label or upload.filename,
+        "filename": filename,
+        "original_filename": upload.filename,
+        "content_type": content_type,
+        "order": order,
+        "created_at": now_iso(),
+    }
+
+
+def indexed_label(labels: list[str] | None, index: int, fallback: str) -> str:
+    if labels and index < len(labels) and labels[index].strip():
+        return labels[index].strip()
+    return fallback
+
+
 def seed_data() -> None:
     created = now_iso()
 
-    if db.users.find_one({"email": "admin@fixture360.local"}) is None:
-        db.users.insert_one({
-            "name": "Fixture360 Admin",
-            "email": "admin@fixture360.local",
-            "password_hash": hash_password("admin123"),
-            "role": "admin",
-            "created_at": created,
-        })
+    existing_new = db.users.find_one({"email": ADMIN_EMAIL})
+    existing_old = db.users.find_one({"email": LEGACY_ADMIN_EMAIL})
+    admin_doc = {
+        "name": "Fixture360 Admin",
+        "employee_id": "ADMIN-001",
+        "email": ADMIN_EMAIL,
+        "password_hash": hash_password("admin123"),
+        "role": "admin",
+        "permissions": ALL_PERMISSIONS,
+        "is_active": True,
+        "created_at": created,
+        "updated_at": created,
+    }
+    if existing_new is None and existing_old is not None:
+        db.users.update_one({"_id": existing_old["_id"]}, {"$set": admin_doc})
+    elif existing_new is None:
+        db.users.insert_one(admin_doc)
+    else:
+        db.users.update_one(
+            {"_id": existing_new["_id"]},
+            {"$set": {"role": "admin", "permissions": ALL_PERMISSIONS, "is_active": True, "employee_id": existing_new.get("employee_id", "ADMIN-001")}},
+        )
 
     ensure_demo_panorama()
     if db.projects.find_one({"unique_code": "DEMO360"}) is None and (UPLOAD_DIR / "walltron-demo.jpeg").exists():
-        project_id = ObjectId()
+        admin = db.users.find_one({"email": ADMIN_EMAIL})
+        created_by = user_payload(admin) if admin else {"id": "system", "employee_id": "SYSTEM", "name": "System", "email": "", "role": "admin"}
+        valid_until = iso_from_dt(now_dt() + timedelta(days=365))
         db.projects.insert_one({
-            "_id": project_id,
             "unique_code": "DEMO360",
+            "valid_days": 365,
+            "valid_hours": 0,
+            "valid_until": valid_until,
+            "max_views": 0,
+            "code_history": [{"code": "DEMO360", "valid_days": 365, "valid_hours": 0, "valid_until": valid_until, "max_views": 0, "created_at": created, "generated_reason": "demo_seed"}],
             "project_name": "Walltron Shop Fixture Preview",
             "client_name": "Demo Client",
             "client_phone": "",
             "location": "Demo Retail Space",
-            "panorama_filename": "walltron-demo.jpeg",
             "shop_width": 18,
             "shop_length": 24,
             "shop_height": 10,
             "unit": "ft",
             "status": "published",
+            "media": [
+                {
+                    "id": str(ObjectId()),
+                    "type": "panorama",
+                    "label": "Demo 360 View 1",
+                    "filename": "walltron-demo.jpeg",
+                    "original_filename": "walltron-demo.jpeg",
+                    "content_type": "image/jpeg",
+                    "order": 1,
+                    "created_at": created,
+                }
+            ],
+            "panorama_filename": "walltron-demo.jpeg",
             "measurements": [
-                {
-                    "id": str(ObjectId()),
-                    "side_name": "Front Display Wall",
-                    "width": 18,
-                    "height": 10,
-                    "unit": "ft",
-                    "yaw": -25,
-                    "pitch": 2,
-                    "remarks": "Main customer-facing wall",
-                    "created_at": created,
-                },
-                {
-                    "id": str(ObjectId()),
-                    "side_name": "Left Product Wall",
-                    "width": 12,
-                    "height": 10,
-                    "unit": "ft",
-                    "yaw": -92,
-                    "pitch": 0,
-                    "remarks": "Exterior/interior wall shelf zone",
-                    "created_at": created,
-                },
-                {
-                    "id": str(ObjectId()),
-                    "side_name": "Right Branding Wall",
-                    "width": 12,
-                    "height": 10,
-                    "unit": "ft",
-                    "yaw": 62,
-                    "pitch": 1,
-                    "remarks": "Round Walltron display zone",
-                    "created_at": created,
-                },
-                {
-                    "id": str(ObjectId()),
-                    "side_name": "Ceiling Height",
-                    "width": 18,
-                    "height": 10,
-                    "unit": "ft",
-                    "yaw": 0,
-                    "pitch": 46,
-                    "remarks": "Overall height reference",
-                    "created_at": created,
-                },
+                {"id": str(ObjectId()), "side_name": "Front Display Wall", "width": 18, "height": 10, "depth": 0, "unit": "ft", "yaw": -25, "pitch": 2, "remarks": "Main customer-facing wall", "created_at": created},
+                {"id": str(ObjectId()), "side_name": "Left Product Wall", "width": 12, "height": 10, "depth": 0, "unit": "ft", "yaw": -92, "pitch": 0, "remarks": "Exterior/interior wall shelf zone", "created_at": created},
+                {"id": str(ObjectId()), "side_name": "Right Branding Wall", "width": 12, "height": 10, "depth": 0, "unit": "ft", "yaw": 62, "pitch": 1, "remarks": "Round Walltron display zone", "created_at": created},
+                {"id": str(ObjectId()), "side_name": "Ceiling Height", "width": 18, "height": 10, "depth": 0, "unit": "ft", "yaw": 0, "pitch": 46, "remarks": "Overall height reference", "created_at": created},
             ],
             "fixtures": [
-                {
-                    "id": str(ObjectId()),
-                    "fixture_name": "Premium Wall Shelf",
-                    "fixture_type": "Wall Display",
-                    "width": 8,
-                    "height": 7,
-                    "depth": 1,
-                    "unit": "ft",
-                    "yaw": -38,
-                    "pitch": -4,
-                    "scale": 1.1,
-                    "color": "#CF1E01",
-                    "remarks": "Proposed shelf fixture",
-                    "created_at": created,
-                },
-                {
-                    "id": str(ObjectId()),
-                    "fixture_name": "Circular Product Island",
-                    "fixture_type": "Center Display",
-                    "width": 6,
-                    "height": 6,
-                    "depth": 2,
-                    "unit": "ft",
-                    "yaw": 50,
-                    "pitch": -5,
-                    "scale": 1.0,
-                    "color": "#101828",
-                    "remarks": "Hero product display",
-                    "created_at": created,
-                },
+                {"id": str(ObjectId()), "fixture_name": "Premium Wall Shelf", "fixture_type": "Wall Display", "width": 8, "height": 7, "depth": 1, "unit": "ft", "yaw": -38, "pitch": -4, "scale": 1.1, "color": "#CF1E01", "remarks": "Proposed shelf fixture", "created_at": created},
+                {"id": str(ObjectId()), "fixture_name": "Circular Product Island", "fixture_type": "Center Display", "width": 6, "height": 6, "depth": 2, "unit": "ft", "yaw": 50, "pitch": -5, "scale": 1.0, "color": "#101828", "remarks": "Hero product display", "created_at": created},
             ],
             "feedback": [],
+            "views": [],
+            "viewer_count": 0,
+            "created_by": created_by,
+            "created_by_user_id": created_by.get("id"),
+            "created_by_employee_id": created_by.get("employee_id"),
+            "created_by_name": created_by.get("name"),
             "created_at": created,
             "updated_at": created,
         })
@@ -238,10 +338,44 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PublicAccessRequest(BaseModel):
+    code: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    company_name: str = Field(..., min_length=1)
+
+
+class PermissionUpdate(BaseModel):
+    view_project: Optional[bool] = None
+    create_project: Optional[bool] = None
+    edit_project: Optional[bool] = None
+    delete_project: Optional[bool] = None
+    publish_project: Optional[bool] = None
+    manage_employees: Optional[bool] = None
+
+
+class EmployeeCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+    employee_id: str = Field(..., min_length=1)
+    email: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=4)
+    permissions: PermissionUpdate = Field(default_factory=PermissionUpdate)
+    is_active: bool = True
+
+
+class EmployeeUpdate(BaseModel):
+    name: Optional[str] = None
+    employee_id: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    permissions: Optional[PermissionUpdate] = None
+    is_active: Optional[bool] = None
+
+
 class MeasurementCreate(BaseModel):
     side_name: str = Field(..., min_length=1)
     width: float
     height: float
+    depth: Optional[float] = 0
     unit: str = "ft"
     yaw: float = 0
     pitch: float = 0
@@ -252,6 +386,7 @@ class MeasurementUpdate(BaseModel):
     side_name: Optional[str] = None
     width: Optional[float] = None
     height: Optional[float] = None
+    depth: Optional[float] = None
     unit: Optional[str] = None
     yaw: Optional[float] = None
     pitch: Optional[float] = None
@@ -282,14 +417,18 @@ class ProjectUpdate(BaseModel):
     shop_height: Optional[float] = None
     unit: Optional[str] = None
     status: Optional[str] = None
+    valid_days: Optional[int] = None
+    valid_hours: Optional[int] = None
+    max_views: Optional[int] = None
 
 
 class FeedbackCreate(BaseModel):
     name: Optional[str] = None
+    company_name: Optional[str] = None
     message: str = Field(..., min_length=1)
 
 
-def require_admin(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+def require_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing authorization token")
     token = authorization.removeprefix("Bearer ").strip()
@@ -297,26 +436,130 @@ def require_admin(authorization: str | None = Header(default=None)) -> dict[str,
     if session is None:
         raise HTTPException(status_code=401, detail="Invalid session")
     user = db.users.find_one({"_id": session["user_id"]})
-    if user is None:
+    if user is None or not user.get("is_active", True):
         raise HTTPException(status_code=401, detail="Invalid session")
-    return {"id": str(user["_id"]), "name": user["name"], "email": user["email"], "role": user["role"]}
+    return user_payload(user)
 
 
-def project_payload(project: dict[str, Any]) -> dict[str, Any]:
+def require_permission(permission: str):
+    def checker(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        if user.get("role") == "admin" or user.get("permissions", {}).get(permission):
+            return user
+        raise HTTPException(status_code=403, detail="You do not have permission for this action")
+    return checker
+
+
+def require_admin_role(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can manage employees")
+    return user
+
+
+def is_code_expired(project: dict[str, Any]) -> bool:
+    valid_until = parse_iso(project.get("valid_until"))
+    return bool(valid_until and valid_until < now_dt())
+
+
+def view_counts_by_code(project: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for view in project.get("views", []):
+        code = (view.get("code") or project.get("unique_code") or "UNKNOWN").upper()
+        counts[code] = counts.get(code, 0) + 1
+    return counts
+
+
+def current_code_view_count(project: dict[str, Any]) -> int:
+    return view_counts_by_code(project).get((project.get("unique_code") or "").upper(), 0)
+
+
+def max_views_reached(project: dict[str, Any]) -> bool:
+    max_views = int(project.get("max_views") or 0)
+    return max_views > 0 and current_code_view_count(project) >= max_views
+
+
+def build_code_history(project: dict[str, Any]) -> list[dict[str, Any]]:
+    counts = view_counts_by_code(project)
+    history = list(project.get("code_history") or [])
+    if not history and project.get("unique_code"):
+        history = [{
+            "code": project.get("unique_code"),
+            "valid_days": project.get("valid_days", 0),
+            "valid_hours": project.get("valid_hours", 0),
+            "valid_until": project.get("valid_until"),
+            "max_views": project.get("max_views", 0),
+            "created_at": project.get("created_at"),
+            "generated_reason": "initial",
+        }]
+    enriched = []
+    for item in history:
+        row = dict(item)
+        code = (row.get("code") or "").upper()
+        row["viewer_count"] = counts.get(code, 0)
+        enriched.append(row)
+    return enriched
+
+
+def generate_unique_code() -> str:
+    for _ in range(20):
+        code = generate_code()
+        if db.projects.find_one({"unique_code": code}) is None:
+            return code
+    raise HTTPException(status_code=500, detail="Could not generate a unique preview code")
+
+
+def can_view_project(user: dict[str, Any], project: dict[str, Any] | None = None) -> bool:
+    if user.get("role") == "admin" or user.get("permissions", {}).get("view_project"):
+        return True
+    if project and project.get("created_by_user_id") == user.get("id"):
+        return True
+    return False
+
+
+def project_payload(project: dict[str, Any], public_base_url: str = "") -> dict[str, Any]:
+    media = [media_payload(item, public_base_url) for item in sort_media(project.get("media", []))]
+    panoramas = [item for item in media if item.get("type") == "panorama"]
+    site_photos = [item for item in media if item.get("type") == "site_photo"]
+    ricky_images = [item for item in media if item.get("type") in {"ricky_image", "recce_image"}]
+    diagrams = [item for item in media if item.get("type") == "diagram_pdf"]
+    primary_panorama = panoramas[0] if panoramas else None
+    fallback_filename = project.get("panorama_filename")
     return {
         "id": str(project["_id"]),
         "unique_code": project.get("unique_code"),
+        "valid_days": project.get("valid_days", 0),
+        "valid_hours": project.get("valid_hours", 0),
+        "valid_until": project.get("valid_until"),
+        "max_views": int(project.get("max_views") or 0),
+        "current_code_view_count": current_code_view_count(project),
+        "remaining_views": max(0, int(project.get("max_views") or 0) - current_code_view_count(project)) if int(project.get("max_views") or 0) > 0 else None,
+        "code_view_counts": view_counts_by_code(project),
+        "code_history": build_code_history(project),
+        "is_expired": is_code_expired(project),
+        "is_view_limit_reached": max_views_reached(project),
         "project_name": project.get("project_name"),
         "client_name": project.get("client_name"),
         "client_phone": project.get("client_phone", ""),
         "location": project.get("location", ""),
-        "panorama_filename": project.get("panorama_filename"),
-        "panorama_url": f"/uploads/{project.get('panorama_filename')}",
+        "panorama_filename": primary_panorama.get("filename") if primary_panorama else fallback_filename,
+        "panorama_url": primary_panorama.get("url") if primary_panorama else media_url(fallback_filename, public_base_url),
+        "media": media,
+        "panoramas": panoramas,
+        "site_photos": site_photos,
+        "ricky_images": ricky_images,
+        "recce_images": ricky_images,
+        "diagrams": diagrams,
         "shop_width": project.get("shop_width"),
         "shop_length": project.get("shop_length"),
         "shop_height": project.get("shop_height"),
         "unit": project.get("unit", "ft"),
         "status": project.get("status", "draft"),
+        "viewer_count": int(project.get("viewer_count", len(project.get("views", [])))),
+        "views": sorted(project.get("views", []), key=lambda item: item.get("viewed_at", ""), reverse=True),
+        "created_by": project.get("created_by") or {
+            "id": project.get("created_by_user_id"),
+            "employee_id": project.get("created_by_employee_id"),
+            "name": project.get("created_by_name"),
+        },
         "created_at": project.get("created_at"),
         "updated_at": project.get("updated_at"),
     }
@@ -327,8 +570,7 @@ def full_project_payload(project_id: str | ObjectId, public_base_url: str = "") 
     project = db.projects.find_one({"_id": oid})
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    data = project_payload(project)
-    data["panorama_url"] = public_base_url + data["panorama_url"]
+    data = project_payload(project, public_base_url=public_base_url)
     data["measurements"] = project.get("measurements", [])
     data["fixtures"] = project.get("fixtures", [])
     data["feedback"] = sorted(project.get("feedback", []), key=lambda item: item.get("created_at", ""), reverse=True)
@@ -343,26 +585,99 @@ def health() -> dict[str, str]:
 
 @app.post("/api/admin/login")
 def login(body: LoginRequest) -> dict[str, Any]:
-    user = db.users.find_one({"email": body.email.lower().strip()})
-    if user is None or user["password_hash"] != hash_password(body.password):
+    user = db.users.find_one({"email": clean_email(body.email)})
+    if user is None or not user.get("is_active", True) or user["password_hash"] != hash_password(body.password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     token = secrets.token_urlsafe(32)
     db.sessions.insert_one({"token": token, "user_id": user["_id"], "created_at": now_iso()})
-    return {
-        "token": token,
-        "user": {"id": str(user["_id"]), "name": user["name"], "email": user["email"], "role": user["role"]},
-    }
+    return {"token": token, "user": user_payload(user)}
 
 
 @app.get("/api/admin/me")
-def me(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+def me(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
     return {"user": user}
 
 
+@app.get("/api/admin/users")
+def list_users(user: dict[str, Any] = Depends(require_admin_role)) -> dict[str, Any]:
+    users = list(db.users.find({}).sort("created_at", DESCENDING))
+    return {"users": [user_payload(row) for row in users]}
+
+
+@app.post("/api/admin/users")
+def create_user(body: EmployeeCreate, user: dict[str, Any] = Depends(require_admin_role)) -> dict[str, Any]:
+    created = now_iso()
+    doc = {
+        "name": body.name.strip(),
+        "employee_id": body.employee_id.strip(),
+        "email": clean_email(body.email),
+        "password_hash": hash_password(body.password),
+        "role": "employee",
+        "permissions": normalized_permissions(body.permissions.model_dump(exclude_none=True), "employee"),
+        "is_active": body.is_active,
+        "created_at": created,
+        "updated_at": created,
+    }
+    try:
+        result = db.users.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=400, detail="Employee email or ID already exists")
+    new_user = db.users.find_one({"_id": result.inserted_id})
+    return {"user": user_payload(new_user)}
+
+
+@app.put("/api/admin/users/{user_id}")
+def update_user(user_id: str, body: EmployeeUpdate, user: dict[str, Any] = Depends(require_admin_role)) -> dict[str, Any]:
+    target = db.users.find_one({"_id": object_id(user_id)})
+    if target is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    fields = body.model_dump(exclude_unset=True)
+    updates: dict[str, Any] = {}
+    if "name" in fields and fields["name"] is not None:
+        updates["name"] = fields["name"].strip()
+    if "employee_id" in fields and fields["employee_id"] is not None:
+        updates["employee_id"] = fields["employee_id"].strip()
+    if "email" in fields and fields["email"] is not None:
+        updates["email"] = clean_email(fields["email"])
+    if "password" in fields and fields["password"]:
+        updates["password_hash"] = hash_password(fields["password"])
+    if "permissions" in fields and fields["permissions"] is not None and target.get("role") != "admin":
+        permissions = fields["permissions"]
+        if isinstance(permissions, PermissionUpdate):
+            permissions = permissions.model_dump(exclude_none=True)
+        current_permissions = dict(target.get("permissions") or {})
+        current_permissions.update(permissions or {})
+        updates["permissions"] = normalized_permissions(current_permissions, "employee")
+    if "is_active" in fields and fields["is_active"] is not None:
+        updates["is_active"] = bool(fields["is_active"])
+    updates["updated_at"] = now_iso()
+    try:
+        db.users.update_one({"_id": target["_id"]}, {"$set": updates})
+    except DuplicateKeyError:
+        raise HTTPException(status_code=400, detail="Employee email or ID already exists")
+    return {"user": user_payload(db.users.find_one({"_id": target["_id"]}))}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def delete_user(user_id: str, user: dict[str, Any] = Depends(require_admin_role)) -> dict[str, str]:
+    target = db.users.find_one({"_id": object_id(user_id)})
+    if target is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if target.get("role") == "admin":
+        raise HTTPException(status_code=400, detail="Admin user cannot be deleted")
+    db.users.delete_one({"_id": target["_id"]})
+    db.sessions.delete_many({"user_id": target["_id"]})
+    return {"message": "Employee deleted"}
+
+
 @app.get("/api/admin/projects")
-def list_projects(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
-    rows = list(db.projects.find({}).sort("created_at", DESCENDING))
-    return {"projects": [project_payload(row) for row in rows]}
+def list_projects(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    query: dict[str, Any] = {}
+    if user.get("role") != "admin" and not user.get("permissions", {}).get("view_project"):
+        # Employees without company-wide View Access can only see projects they created.
+        query = {"created_by_user_id": user.get("id")}
+    rows = list(db.projects.find(query).sort("created_at", DESCENDING))
+    return {"projects": [project_payload(row) for row in rows], "user": user}
 
 
 @app.post("/api/admin/projects")
@@ -375,31 +690,82 @@ def create_project(
     shop_length: float | None = Form(None),
     shop_height: float | None = Form(None),
     unit: str = Form("ft"),
-    panorama: UploadFile = File(...),
-    user: dict[str, Any] = Depends(require_admin),
+    validity_days: int = Form(30),
+    validity_hours: int = Form(0),
+    max_views: int = Form(0),
+    site_photos: list[UploadFile] = File(default=[]),
+    site_photo_labels: list[str] = Form(default=[]),
+    ricky_images: list[UploadFile] = File(default=[]),
+    ricky_image_labels: list[str] = Form(default=[]),
+    recce_images: list[UploadFile] = File(default=[]),
+    recce_image_labels: list[str] = Form(default=[]),
+    diagram_pdfs: list[UploadFile] = File(default=[]),
+    diagram_pdf_labels: list[str] = Form(default=[]),
+    panorama_images: list[UploadFile] = File(default=[]),
+    panorama_image_labels: list[str] = Form(default=[]),
+    panorama: UploadFile | None = File(None),
+    user: dict[str, Any] = Depends(require_permission("create_project")),
 ) -> dict[str, Any]:
-    if not panorama.filename:
-        raise HTTPException(status_code=400, detail="Panorama image is required")
-    content_type = panorama.content_type or ""
-    if not content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Only image uploads are allowed")
+    if panorama and panorama.filename:
+        panorama_images.append(panorama)
+    if not panorama_images:
+        raise HTTPException(status_code=400, detail="At least one panorama image is required")
+    validity_days, validity_hours = validate_validity(validity_days, validity_hours)
+    max_views = max(0, int(max_views or 0))
 
-    filename = safe_filename(panorama.filename)
-    filepath = UPLOAD_DIR / filename
-    with filepath.open("wb") as out_file:
-        shutil.copyfileobj(panorama.file, out_file)
+    media: list[dict[str, Any]] = []
+    order = 1
+    for index, upload in enumerate(site_photos):
+        if upload and upload.filename:
+            media.append(make_media_item(upload, "site_photo", order, label=indexed_label(site_photo_labels, index, f"Site Photo {index + 1}")))
+            order += 1
+    for index, upload in enumerate(ricky_images):
+        if upload and upload.filename:
+            media.append(make_media_item(upload, "ricky_image", order, label=indexed_label(ricky_image_labels, index, f"Ricky Image {index + 1}")))
+            order += 1
+    for index, upload in enumerate(recce_images):
+        if upload and upload.filename:
+            media.append(make_media_item(upload, "ricky_image", order, label=indexed_label(recce_image_labels, index, f"Ricky Image {index + 1}")))
+            order += 1
+    for index, upload in enumerate(diagram_pdfs):
+        if upload and upload.filename:
+            media.append(make_media_item(upload, "diagram_pdf", order, label=indexed_label(diagram_pdf_labels, index, f"2D Diagram {index + 1}")))
+            order += 1
+    for index, upload in enumerate(panorama_images):
+        if upload and upload.filename:
+            media.append(make_media_item(upload, "panorama", order, label=indexed_label(panorama_image_labels, index, f"3D View {index + 1}")))
+            order += 1
+
+    if not [item for item in media if item.get("type") == "panorama"]:
+        raise HTTPException(status_code=400, detail="At least one valid panorama image is required")
 
     created = now_iso()
+    valid_until = calculate_valid_until(validity_days, validity_hours)
+    primary_panorama = next(item for item in media if item["type"] == "panorama")
+    created_by = {
+        "id": user.get("id"),
+        "employee_id": user.get("employee_id"),
+        "name": user.get("name"),
+        "email": user.get("email"),
+        "role": user.get("role"),
+    }
+
     for _ in range(10):
         code = generate_code()
         try:
             result = db.projects.insert_one({
                 "unique_code": code,
+                "valid_days": validity_days,
+                "valid_hours": validity_hours,
+                "valid_until": valid_until,
+                "max_views": max_views,
+                "code_history": [{"code": code, "valid_days": validity_days, "valid_hours": validity_hours, "valid_until": valid_until, "max_views": max_views, "created_at": created, "generated_reason": "initial_create"}],
                 "project_name": project_name,
                 "client_name": client_name,
                 "client_phone": client_phone,
                 "location": location,
-                "panorama_filename": filename,
+                "panorama_filename": primary_panorama["filename"],
+                "media": media,
                 "shop_width": shop_width,
                 "shop_length": shop_length,
                 "shop_height": shop_height,
@@ -408,6 +774,12 @@ def create_project(
                 "measurements": [],
                 "fixtures": [],
                 "feedback": [],
+                "views": [],
+                "viewer_count": 0,
+                "created_by": created_by,
+                "created_by_user_id": created_by.get("id"),
+                "created_by_employee_id": created_by.get("employee_id"),
+                "created_by_name": created_by.get("name"),
                 "created_at": created,
                 "updated_at": created,
             })
@@ -418,68 +790,144 @@ def create_project(
 
 
 @app.get("/api/admin/projects/{project_id}")
-def get_project(project_id: str, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
-    return {"project": full_project_payload(project_id)}
+def get_project(project_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    project = db.projects.find_one({"_id": object_id(project_id)})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not can_view_project(user, project):
+        raise HTTPException(status_code=403, detail="You do not have view access for this project")
+    return {"project": full_project_payload(project["_id"])}
 
 
 @app.put("/api/admin/projects/{project_id}")
-def update_project(project_id: str, body: ProjectUpdate, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+def update_project(project_id: str, body: ProjectUpdate, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    oid = object_id(project_id)
+    project = db.projects.find_one({"_id": oid})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         return {"project": full_project_payload(project_id)}
-    allowed = {
-        "project_name",
-        "client_name",
-        "client_phone",
-        "location",
-        "shop_width",
-        "shop_length",
-        "shop_height",
-        "unit",
-        "status",
-    }
+    if "status" in fields and fields.get("status") is not None:
+        if user.get("role") != "admin" and not user.get("permissions", {}).get("publish_project"):
+            raise HTTPException(status_code=403, detail="You do not have permission to publish projects")
+    else:
+        if user.get("role") != "admin" and not user.get("permissions", {}).get("edit_project"):
+            raise HTTPException(status_code=403, detail="You do not have permission to edit projects")
+    allowed = {"project_name", "client_name", "client_phone", "location", "shop_width", "shop_length", "shop_height", "unit", "status"}
     updates = {key: value for key, value in fields.items() if key in allowed}
+
+    max_views = int(fields.get("max_views") if fields.get("max_views") is not None else project.get("max_views", 0) or 0)
+    updates["max_views"] = max(0, max_views)
+
+    validity_changed = "valid_days" in fields or "valid_hours" in fields
+    if validity_changed:
+        days = fields.get("valid_days") if fields.get("valid_days") is not None else project.get("valid_days", 0)
+        hours = fields.get("valid_hours") if fields.get("valid_hours") is not None else project.get("valid_hours", 0)
+        days, hours = validate_validity(days, hours)
+        old_code = project.get("unique_code")
+        new_code = generate_unique_code()
+        new_valid_until = calculate_valid_until(days, hours)
+        now = now_iso()
+        history = list(project.get("code_history") or [])
+        if not history and old_code:
+            history.append({"code": old_code, "valid_days": project.get("valid_days", 0), "valid_hours": project.get("valid_hours", 0), "valid_until": project.get("valid_until"), "max_views": project.get("max_views", 0), "created_at": project.get("created_at"), "generated_reason": "initial"})
+        for row in history:
+            if row.get("code") == old_code and not row.get("replaced_at"):
+                row["replaced_at"] = now
+        history.append({"code": new_code, "valid_days": days, "valid_hours": hours, "valid_until": new_valid_until, "max_views": updates["max_views"], "created_at": now, "generated_reason": "validity_updated", "previous_code": old_code})
+        updates["unique_code"] = new_code
+        updates["valid_days"] = days
+        updates["valid_hours"] = hours
+        updates["valid_until"] = new_valid_until
+        updates["code_history"] = history
+
     updates["updated_at"] = now_iso()
-    result = db.projects.update_one({"_id": object_id(project_id)}, {"$set": updates})
+    result = db.projects.update_one({"_id": oid}, {"$set": updates})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Project not found")
     return {"project": full_project_payload(project_id)}
 
 
 @app.delete("/api/admin/projects/{project_id}")
-def delete_project(project_id: str, user: dict[str, Any] = Depends(require_admin)) -> dict[str, str]:
+def delete_project(project_id: str, user: dict[str, Any] = Depends(require_permission("delete_project"))) -> dict[str, str]:
     project = db.projects.find_one({"_id": object_id(project_id)})
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     db.projects.delete_one({"_id": object_id(project_id)})
-    file_path = UPLOAD_DIR / project["panorama_filename"]
-    if file_path.exists() and project["panorama_filename"] != "walltron-demo.jpeg":
-        file_path.unlink(missing_ok=True)
+    for item in project.get("media", []):
+        filename = item.get("filename")
+        if filename and filename != "walltron-demo.jpeg":
+            (UPLOAD_DIR / filename).unlink(missing_ok=True)
+    legacy = project.get("panorama_filename")
+    if legacy and legacy != "walltron-demo.jpeg":
+        (UPLOAD_DIR / legacy).unlink(missing_ok=True)
     return {"message": "Project deleted"}
 
 
+@app.post("/api/admin/projects/{project_id}/media")
+def add_project_media(
+    project_id: str,
+    media_type: str = Form(...),
+    label: str = Form(""),
+    labels: list[str] = Form(default=[]),
+    files: list[UploadFile] = File(default=[]),
+    user: dict[str, Any] = Depends(require_permission("edit_project")),
+) -> dict[str, Any]:
+    project = db.projects.find_one({"_id": object_id(project_id)})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if media_type not in {"site_photo", "ricky_image", "recce_image", "diagram_pdf", "panorama"}:
+        raise HTTPException(status_code=400, detail="Invalid media type")
+    if not files:
+        raise HTTPException(status_code=400, detail="Upload at least one file")
+    order_start = len(project.get("media", [])) + 1
+    new_items = []
+    for index, upload in enumerate(files):
+        if upload and upload.filename:
+            normalized_type = "ricky_image" if media_type == "recce_image" else media_type
+            new_items.append(make_media_item(upload, normalized_type, order_start + index, label=indexed_label(labels, index, label or upload.filename)))
+    if not new_items:
+        raise HTTPException(status_code=400, detail="No valid files uploaded")
+    updates: dict[str, Any] = {"$push": {"media": {"$each": new_items}}, "$set": {"updated_at": now_iso()}}
+    if media_type == "panorama" and not project.get("panorama_filename"):
+        updates["$set"]["panorama_filename"] = new_items[0]["filename"]
+    db.projects.update_one({"_id": project["_id"]}, updates)
+    return {"project": full_project_payload(project_id)}
+
+
+@app.delete("/api/admin/media/{media_id}")
+def delete_project_media(media_id: str, user: dict[str, Any] = Depends(require_permission("edit_project"))) -> dict[str, Any]:
+    project = db.projects.find_one({"media.id": media_id})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+    item = next((entry for entry in project.get("media", []) if entry.get("id") == media_id), None)
+    db.projects.update_one({"_id": project["_id"]}, {"$pull": {"media": {"id": media_id}}, "$set": {"updated_at": now_iso()}})
+    if item and item.get("filename") != "walltron-demo.jpeg":
+        (UPLOAD_DIR / item["filename"]).unlink(missing_ok=True)
+    return {"project": full_project_payload(project["_id"])}
+
+
 @app.post("/api/admin/projects/{project_id}/measurements")
-def add_measurement(project_id: str, body: MeasurementCreate, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+def add_measurement(project_id: str, body: MeasurementCreate, user: dict[str, Any] = Depends(require_permission("edit_project"))) -> dict[str, Any]:
     item = body.model_dump()
     item["id"] = str(ObjectId())
     item["created_at"] = now_iso()
-    result = db.projects.update_one(
-        {"_id": object_id(project_id)},
-        {"$push": {"measurements": item}, "$set": {"updated_at": now_iso()}},
-    )
+    result = db.projects.update_one({"_id": object_id(project_id)}, {"$push": {"measurements": item}, "$set": {"updated_at": now_iso()}})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Project not found")
     return {"project": full_project_payload(project_id)}
 
 
 @app.put("/api/admin/measurements/{measurement_id}")
-def update_measurement(measurement_id: str, body: MeasurementUpdate, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+def update_measurement(measurement_id: str, body: MeasurementUpdate, user: dict[str, Any] = Depends(require_permission("edit_project"))) -> dict[str, Any]:
     fields = body.model_dump(exclude_unset=True)
     project = db.projects.find_one({"measurements.id": measurement_id})
     if project is None:
         raise HTTPException(status_code=404, detail="Measurement not found")
     if fields:
-        allowed = {"side_name", "width", "height", "unit", "yaw", "pitch", "remarks"}
+        allowed = {"side_name", "width", "height", "depth", "unit", "yaw", "pitch", "remarks"}
         updates = {f"measurements.$.{key}": value for key, value in fields.items() if key in allowed}
         updates["updated_at"] = now_iso()
         db.projects.update_one({"measurements.id": measurement_id}, {"$set": updates})
@@ -487,41 +935,54 @@ def update_measurement(measurement_id: str, body: MeasurementUpdate, user: dict[
 
 
 @app.delete("/api/admin/measurements/{measurement_id}")
-def delete_measurement(measurement_id: str, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+def delete_measurement(measurement_id: str, user: dict[str, Any] = Depends(require_permission("edit_project"))) -> dict[str, Any]:
     project = db.projects.find_one({"measurements.id": measurement_id})
     if project is None:
         raise HTTPException(status_code=404, detail="Measurement not found")
-    db.projects.update_one(
-        {"_id": project["_id"]},
-        {"$pull": {"measurements": {"id": measurement_id}}, "$set": {"updated_at": now_iso()}},
-    )
+    db.projects.update_one({"_id": project["_id"]}, {"$pull": {"measurements": {"id": measurement_id}}, "$set": {"updated_at": now_iso()}})
     return {"project": full_project_payload(project["_id"])}
 
 
 @app.post("/api/admin/projects/{project_id}/fixtures")
-def add_fixture(project_id: str, body: FixtureCreate, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+def add_fixture(project_id: str, body: FixtureCreate, user: dict[str, Any] = Depends(require_permission("edit_project"))) -> dict[str, Any]:
     item = body.model_dump()
     item["id"] = str(ObjectId())
     item["created_at"] = now_iso()
-    result = db.projects.update_one(
-        {"_id": object_id(project_id)},
-        {"$push": {"fixtures": item}, "$set": {"updated_at": now_iso()}},
-    )
+    result = db.projects.update_one({"_id": object_id(project_id)}, {"$push": {"fixtures": item}, "$set": {"updated_at": now_iso()}})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Project not found")
     return {"project": full_project_payload(project_id)}
 
 
 @app.delete("/api/admin/fixtures/{fixture_id}")
-def delete_fixture(fixture_id: str, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+def delete_fixture(fixture_id: str, user: dict[str, Any] = Depends(require_permission("edit_project"))) -> dict[str, Any]:
     project = db.projects.find_one({"fixtures.id": fixture_id})
     if project is None:
         raise HTTPException(status_code=404, detail="Fixture not found")
-    db.projects.update_one(
-        {"_id": project["_id"]},
-        {"$pull": {"fixtures": {"id": fixture_id}}, "$set": {"updated_at": now_iso()}},
-    )
+    db.projects.update_one({"_id": project["_id"]}, {"$pull": {"fixtures": {"id": fixture_id}}, "$set": {"updated_at": now_iso()}})
     return {"project": full_project_payload(project["_id"])}
+
+
+@app.post("/api/public/access")
+def access_public_project(body: PublicAccessRequest, request: Request) -> dict[str, Any]:
+    code = body.code.strip().upper()
+    project = db.projects.find_one({"unique_code": code})
+    if project is None:
+        raise HTTPException(status_code=404, detail="Preview code not found")
+    if is_code_expired(project):
+        raise HTTPException(status_code=410, detail="This preview code has expired. Please contact ADINN for a new code.")
+    if max_views_reached(project):
+        raise HTTPException(status_code=429, detail="This preview code has reached its maximum allowed views. Please contact ADINN for a new code.")
+    view = {
+        "id": str(ObjectId()),
+        "code": code,
+        "name": body.name.strip(),
+        "company_name": body.company_name.strip(),
+        "viewed_at": now_iso(),
+        "ip_address": request.client.host if request.client else None,
+    }
+    db.projects.update_one({"_id": project["_id"]}, {"$push": {"views": view}, "$inc": {"viewer_count": 1}, "$set": {"updated_at": now_iso()}})
+    return {"project": full_project_payload(project["_id"], public_base_url=PUBLIC_BASE_URL), "viewer": view}
 
 
 @app.get("/api/public/projects/{unique_code}")
@@ -530,19 +991,17 @@ def get_public_project(unique_code: str) -> dict[str, Any]:
     project = db.projects.find_one({"unique_code": code})
     if project is None:
         raise HTTPException(status_code=404, detail="Preview code not found")
+    if is_code_expired(project):
+        raise HTTPException(status_code=410, detail="This preview code has expired. Please contact ADINN for a new code.")
+    if max_views_reached(project):
+        raise HTTPException(status_code=429, detail="This preview code has reached its maximum allowed views. Please contact ADINN for a new code.")
     return {"project": full_project_payload(project["_id"], public_base_url=PUBLIC_BASE_URL)}
 
 
 @app.post("/api/public/projects/{unique_code}/feedback")
 def add_public_feedback(unique_code: str, body: FeedbackCreate) -> dict[str, str]:
     code = unique_code.strip().upper()
-    feedback = {
-        "id": str(ObjectId()),
-        "name": body.name,
-        "message": body.message,
-        "status": "new",
-        "created_at": now_iso(),
-    }
+    feedback = {"id": str(ObjectId()), "name": body.name, "company_name": body.company_name, "message": body.message, "status": "new", "created_at": now_iso()}
     result = db.projects.update_one({"unique_code": code}, {"$push": {"feedback": feedback}, "$set": {"updated_at": now_iso()}})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Preview code not found")
@@ -559,5 +1018,4 @@ def get_upload(filename: str) -> FileResponse:
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
