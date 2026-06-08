@@ -105,3 +105,27 @@ Then redeploy backend.
 - Set `PUBLIC_BASE_URL` to the final backend URL.
 - Set `CORS_ORIGINS` to the final frontend URL only.
 - Test admin login, employee CRUD, project creation, media upload, preview code validity, max views, measurements, fixtures, and feedback.
+
+## Cloudinary upload storage
+
+For Render free deployments, do not rely on local upload folders for permanent media. Add these Render environment variables so uploads are stored in Cloudinary and the permanent Cloudinary URL is saved in Neon:
+
+```env
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+CLOUDINARY_FOLDER=fixture360
+```
+
+Keep these existing variables:
+
+```env
+DATABASE_URL=your_neon_database_url
+PUBLIC_BASE_URL=https://fixture360-api-z4lf.onrender.com
+CORS_ORIGINS=https://fixture360.vercel.app,http://localhost:5173
+PYTHON_VERSION=3.14.3
+DATA_DIR=/tmp/fixture360
+UPLOAD_DIR=/tmp/fixture360/uploads
+```
+
+`DATA_DIR` and `UPLOAD_DIR` are only a fallback/temp path. Cloudinary is the permanent storage when configured.

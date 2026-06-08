@@ -21,11 +21,21 @@ from dataclasses import dataclass
 import psycopg
 from psycopg.rows import dict_row
 
+try:
+    import cloudinary
+    import cloudinary.uploader
+except Exception:  # Cloudinary is optional for local fallback installs.
+    cloudinary = None
+
 ASCENDING = 1
 DESCENDING = -1
 
 
 class DuplicateKeyError(Exception):
+    pass
+
+
+class PyMongoError(Exception):
     pass
 
 
@@ -43,6 +53,20 @@ PROJECT_DIR = BASE_DIR.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR))).resolve()
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(DATA_DIR / "uploads"))).resolve()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY", "").strip()
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "").strip()
+CLOUDINARY_FOLDER = os.getenv("CLOUDINARY_FOLDER", "fixture360").strip() or "fixture360"
+USE_CLOUDINARY = bool(CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET and cloudinary is not None)
+
+if USE_CLOUDINARY:
+    cloudinary.config(
+        cloud_name=CLOUDINARY_CLOUD_NAME,
+        api_key=CLOUDINARY_API_KEY,
+        api_secret=CLOUDINARY_API_SECRET,
+        secure=True,
+    )
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
 if not DATABASE_URL:
@@ -440,18 +464,67 @@ def ensure_demo_panorama() -> None:
 def media_url(filename: str | None, public_base_url: str = "") -> str:
     if not filename:
         return ""
+    if isinstance(filename, str) and filename.startswith(("http://", "https://")):
+        return filename
     return f"{public_base_url}/uploads/{filename}"
 
 
 def media_payload(media: dict[str, Any], public_base_url: str = "") -> dict[str, Any]:
     item = dict(media)
-    item["url"] = media_url(item.get("filename"), public_base_url)
+    item["url"] = item.get("url") or media_url(item.get("filename"), public_base_url)
     return item
 
 
 def sort_media(media: list[dict[str, Any]]) -> list[dict[str, Any]]:
     priority = {"site_photo": 1, "ricky_image": 2, "recce_image": 2, "diagram_pdf": 3, "panorama": 4}
     return sorted(media or [], key=lambda item: (priority.get(item.get("type"), 99), item.get("order", 0), item.get("created_at", "")))
+
+
+def cloudinary_resource_type(media_type: str) -> str:
+    # PDFs and future non-image files should be accepted. Cloudinary detects the proper type with "auto".
+    return "auto" if media_type == "diagram_pdf" else "image"
+
+
+def upload_to_cloudinary(upload: UploadFile, filename: str, media_type: str) -> dict[str, Any]:
+    if not USE_CLOUDINARY:
+        return {}
+    if cloudinary is None:
+        raise HTTPException(status_code=500, detail="Cloudinary library is not installed")
+    try:
+        upload.file.seek(0)
+        public_id = f"{CLOUDINARY_FOLDER}/{Path(filename).stem}"
+        result = cloudinary.uploader.upload(
+            upload.file,
+            public_id=public_id,
+            resource_type=cloudinary_resource_type(media_type),
+            overwrite=False,
+            use_filename=False,
+            unique_filename=False,
+        )
+        return {
+            "url": result.get("secure_url") or result.get("url"),
+            "cloudinary_public_id": result.get("public_id"),
+            "cloudinary_resource_type": result.get("resource_type") or cloudinary_resource_type(media_type),
+            "cloudinary_format": result.get("format"),
+            "storage": "cloudinary",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {exc}") from exc
+
+
+def delete_cloudinary_media(item: dict[str, Any]) -> None:
+    if not item or item.get("storage") != "cloudinary" or not item.get("cloudinary_public_id"):
+        return
+    if not USE_CLOUDINARY or cloudinary is None:
+        return
+    try:
+        cloudinary.uploader.destroy(
+            item["cloudinary_public_id"],
+            resource_type=item.get("cloudinary_resource_type") or "image",
+        )
+    except Exception:
+        # Do not block project deletion if remote cleanup fails.
+        return
 
 
 def make_media_item(upload: UploadFile, media_type: str, order: int, label: str | None = None) -> dict[str, Any]:
@@ -467,11 +540,8 @@ def make_media_item(upload: UploadFile, media_type: str, order: int, label: str 
 
     fallback = "panorama" if media_type == "panorama" else "ricky" if media_type in {"ricky_image", "recce_image"} else "site-photo" if media_type == "site_photo" else "diagram"
     filename = safe_filename(upload.filename, fallback=fallback)
-    filepath = UPLOAD_DIR / filename
-    with filepath.open("wb") as out_file:
-        shutil.copyfileobj(upload.file, out_file)
 
-    return {
+    item = {
         "id": str(ObjectId()),
         "type": media_type,
         "label": label or upload.filename,
@@ -481,6 +551,17 @@ def make_media_item(upload: UploadFile, media_type: str, order: int, label: str 
         "order": order,
         "created_at": now_iso(),
     }
+
+    if USE_CLOUDINARY:
+        item.update(upload_to_cloudinary(upload, filename, media_type))
+    else:
+        filepath = UPLOAD_DIR / filename
+        upload.file.seek(0)
+        with filepath.open("wb") as out_file:
+            shutil.copyfileobj(upload.file, out_file)
+        item["storage"] = "local"
+
+    return item
 
 
 def indexed_label(labels: list[str] | None, index: int, fallback: str) -> str:
@@ -827,9 +908,9 @@ def full_project_payload(project_id: str | ObjectId, public_base_url: str = "") 
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, Any]:
     db.ping()
-    return {"status": "ok", "database": "neon_postgres"}
+    return {"status": "ok", "database": "neon_postgres", "storage": "cloudinary" if USE_CLOUDINARY else "local"}
 
 
 @app.post("/api/admin/login")
@@ -1106,8 +1187,9 @@ def delete_project(project_id: str, user: dict[str, Any] = Depends(require_permi
         raise HTTPException(status_code=404, detail="Project not found")
     db.projects.delete_one({"_id": object_id(project_id)})
     for item in project.get("media", []):
+        delete_cloudinary_media(item)
         filename = item.get("filename")
-        if filename and filename != "walltron-demo.jpeg":
+        if filename and filename != "walltron-demo.jpeg" and not str(filename).startswith(("http://", "https://")):
             (UPLOAD_DIR / filename).unlink(missing_ok=True)
     legacy = project.get("panorama_filename")
     if legacy and legacy != "walltron-demo.jpeg":
@@ -1153,7 +1235,9 @@ def delete_project_media(media_id: str, user: dict[str, Any] = Depends(require_p
         raise HTTPException(status_code=404, detail="Media not found")
     item = next((entry for entry in project.get("media", []) if entry.get("id") == media_id), None)
     db.projects.update_one({"_id": project["_id"]}, {"$pull": {"media": {"id": media_id}}, "$set": {"updated_at": now_iso()}})
-    if item and item.get("filename") != "walltron-demo.jpeg":
+    if item:
+        delete_cloudinary_media(item)
+    if item and item.get("filename") != "walltron-demo.jpeg" and not str(item.get("filename", "")).startswith(("http://", "https://")):
         (UPLOAD_DIR / item["filename"]).unlink(missing_ok=True)
     return {"project": full_project_payload(project["_id"])}
 

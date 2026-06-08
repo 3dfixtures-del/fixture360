@@ -134,3 +134,16 @@ Recommended deployment:
 - Media file storage: Render persistent disk for MVP, object storage for production
 
 For production scalability, move uploaded files to S3, Cloudflare R2, or another object storage service.
+
+## Permanent file uploads with Cloudinary
+
+This version stores uploaded site photos, Ricky images, 2D PDFs, and panorama images permanently in Cloudinary when the following backend environment variables are configured:
+
+```env
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+CLOUDINARY_FOLDER=fixture360
+```
+
+Project data continues to be stored in Neon PostgreSQL using `DATABASE_URL`. If Cloudinary variables are not present, the backend falls back to local upload storage for development.
